@@ -16,7 +16,7 @@ default = []
 
 [dependencies]
 seahash = { version = "4.1", default-features = false }
-sqlparser = { git = "https://github.com/apache/datafusion-sqlparser-rs", rev = "75a1040597fd6233f24a6b41641b360e30fb01b9", default-features = false }
+sqlparser = { git = "https://github.com/apache/datafusion-sqlparser-rs", branch = "main", default-features = false }
 thiserror = { version = "2.0", default-features = false }
 
 [dev-dependencies]
