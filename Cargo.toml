@@ -1,0 +1,28 @@
+[package]
+name = "sqlparser-canonicalize"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+authors = ["Luca Cappelletti"]
+license = "MIT"
+description = "Canonical text and stable hashes for sqlparser ASTs"
+repository = "https://github.com/LucaCappelletti94/sqlparser-canonicalize"
+readme = "README.md"
+keywords = ["sql", "canonicalization", "parser", "hash", "no-std"]
+categories = ["database", "parser-implementations", "no-std"]
+
+[features]
+default = []
+
+[dependencies]
+seahash = { version = "4.1", default-features = false }
+sqlparser = { git = "https://github.com/apache/datafusion-sqlparser-rs", rev = "75a1040597fd6233f24a6b41641b360e30fb01b9", default-features = false }
+thiserror = { version = "2.0", default-features = false }
+
+[dev-dependencies]
+criterion = { version = "0.8", features = ["html_reports"] }
+proptest = "1.11"
+
+[[bench]]
+name = "canonicalize"
+harness = false

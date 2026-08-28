@@ -1,0 +1,23 @@
+[package]
+name = "sqlparser-canonicalize-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+sqlparser = { git = "https://github.com/apache/datafusion-sqlparser-rs", rev = "75a1040597fd6233f24a6b41641b360e30fb01b9", default-features = false }
+sqlparser-canonicalize = { path = ".." }
+
+[[bin]]
+name = "normalize_sql"
+path = "fuzz_targets/normalize_sql.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]
+members = ["."]
