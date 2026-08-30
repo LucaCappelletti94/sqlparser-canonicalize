@@ -600,13 +600,21 @@ fn test_reject_literal_that_loses_a_quote_level() {
     ));
 }
 
+/// A delimited name escapes its own delimiter by doubling it, and the canonical spelling has
+/// to do the same or it names something else. subql keys rows on such a column.
 #[test]
-fn test_reject_identifier_that_loses_a_quote_level() {
-    assert!(matches!(
-        Canonicalizer::new(&PostgreSqlDialect {})
-            .normalize_sql("SELECT * FROM t WHERE \"a\"\"\"\"b\" = 1"),
-        Err(CanonicalizeError::NotRoundTrippable(_))
-    ));
+fn test_quoted_identifier_carrying_its_delimiter_is_escaped() {
+    let canonicalizer = Canonicalizer::new(&PostgreSqlDialect {});
+    let canonical = canonicalizer
+        .normalize_sql("SELECT * FROM t WHERE \"a\"\"b\" = 7")
+        .unwrap();
+    assert_eq!(canonical, "(\"a\"\"b\" = 7)");
+
+    // Two doubled delimiters in the name survive the same way.
+    let deeper = canonicalizer
+        .normalize_sql("SELECT * FROM t WHERE \"a\"\"\"\"b\" = 1")
+        .unwrap();
+    assert_eq!(deeper, "(\"a\"\"\"\"b\" = 1)");
 }
 
 #[test]

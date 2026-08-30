@@ -523,11 +523,19 @@ fn identifier_text(
     if bare_spelling_is_faithful(&resolved, quoted, folding) {
         return Ok(resolved);
     }
+    // A delimited name escapes its own delimiter by doubling it, so `a"b` is written
+    // `"a""b"`. Emitting the delimiter raw produces a name that reads back as something else.
     let quote = identifier.quote_style.unwrap_or('"');
-    if !quoting_survives_printing(&resolved, quote) {
-        return Err(CanonicalizeError::NotRoundTrippable(resolved));
+    let mut delimited = String::with_capacity(resolved.len() + 2);
+    delimited.push(quote);
+    for character in resolved.chars() {
+        if character == quote {
+            delimited.push(quote);
+        }
+        delimited.push(character);
     }
-    Ok(format!("{quote}{resolved}{quote}"))
+    delimited.push(quote);
+    Ok(delimited)
 }
 
 /// Reports whether writing `name` without quotes reads back as `name` itself.
