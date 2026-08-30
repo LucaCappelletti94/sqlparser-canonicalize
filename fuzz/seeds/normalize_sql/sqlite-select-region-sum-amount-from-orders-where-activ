@@ -1,0 +1,1 @@
+SELECT region, SUM(amount) FROM orders WHERE active = TRUE GROUP BY region HAVING COUNT(*) > 2

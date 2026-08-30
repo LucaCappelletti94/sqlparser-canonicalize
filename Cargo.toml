@@ -7,6 +7,7 @@ authors = ["Luca Cappelletti"]
 license = "MIT"
 description = "Canonical text and stable hashes for sqlparser ASTs"
 repository = "https://github.com/LucaCappelletti94/sqlparser-canonicalize"
+documentation = "https://docs.rs/sqlparser-canonicalize"
 readme = "README.md"
 keywords = ["sql", "canonicalization", "parser", "hash", "no-std"]
 categories = ["database", "parser-implementations", "no-std"]

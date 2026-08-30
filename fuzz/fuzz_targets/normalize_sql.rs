@@ -1,7 +1,9 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use sqlparser::dialect::{Dialect, MySqlDialect, PostgreSqlDialect, SQLiteDialect};
+use sqlparser::dialect::{
+    AnsiDialect, Dialect, GenericDialect, MySqlDialect, PostgreSqlDialect, SQLiteDialect,
+};
 use sqlparser_canonicalize::{hash_canonical, normalize_sql};
 
 fn exercise(sql: &str, dialect: &dyn Dialect) {
@@ -25,12 +27,14 @@ fuzz_target!(|data: &[u8]| {
     let Ok(sql) = core::str::from_utf8(bytes) else {
         return;
     };
-    let dialect: &dyn Dialect = match selector % 3 {
+    let dialect: &dyn Dialect = match selector % 5 {
         0 => &PostgreSqlDialect {},
         1 => &MySqlDialect {},
-        _ => &SQLiteDialect {},
+        2 => &SQLiteDialect {},
+        3 => &GenericDialect {},
+        _ => &AnsiDialect {},
     };
-    if selector % 6 < 3 {
+    if (selector / 5) % 2 == 0 {
         exercise(sql, dialect);
     } else {
         exercise(&format!("SELECT * FROM t WHERE {sql}"), dialect);

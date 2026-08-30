@@ -544,3 +544,64 @@ fn test_distinct_operators_produce_different_strings() {
         "'+' and '-' must produce different normalized strings"
     );
 }
+
+fn unsupported_message(sql: &str) -> String {
+    match normalize_sql(sql, &PostgreSqlDialect {}) {
+        Err(CanonicalizeError::Unsupported(message)) => message,
+        other => panic!("expected an unsupported error for {sql}, got {other:?}"),
+    }
+}
+
+#[test]
+fn test_reject_sql_beyond_length_limit() {
+    let padding = " ".repeat(8193);
+    let sql = format!("SELECT * FROM t WHERE a = 1{padding}");
+    assert_eq!(unsupported_message(&sql), "SQL input is too long");
+}
+
+#[test]
+fn test_reject_control_character() {
+    assert_eq!(
+        unsupported_message("SELECT * FROM t WHERE a = \u{1}"),
+        "Control character in SQL"
+    );
+}
+
+#[test]
+fn test_reject_unbalanced_square_bracket() {
+    assert_eq!(
+        unsupported_message("SELECT * FROM t WHERE [a = 1"),
+        "Unbalanced square brackets"
+    );
+}
+
+#[test]
+fn test_reject_uncanonicalizable_binary_operator() {
+    assert_eq!(
+        unsupported_message("SELECT * FROM t WHERE a # b = 1"),
+        "Unsupported binary operator: #"
+    );
+}
+
+#[test]
+fn test_reject_literal_that_loses_a_quote_level() {
+    assert_eq!(
+        unsupported_message("SELECT * FROM t WHERE a = ''''''"),
+        "String literal cannot be printed without changing its value"
+    );
+}
+
+#[test]
+fn test_reject_identifier_that_loses_a_quote_level() {
+    assert_eq!(
+        unsupported_message("SELECT * FROM t WHERE \"a\"\"\"\"b\" = 1"),
+        "Quoted identifier cannot be printed without changing its value"
+    );
+}
+
+#[test]
+fn test_function_call_in_predicate_is_canonicalized() {
+    let dialect = PostgreSqlDialect {};
+    let canonical = normalize_sql("SELECT * FROM t WHERE COALESCE(a, 1) > 0", &dialect).unwrap();
+    assert_eq!(canonical, "(COALESCE(a, 1) > 0)");
+}

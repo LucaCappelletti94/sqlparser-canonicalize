@@ -56,15 +56,12 @@ fn normalize_sql_inner(sql: &str, dialect: &dyn Dialect) -> Result<String, Canon
         column: 0,
         message: error.to_string(),
     })?;
-    if statements.len() != 1 {
+    let [statement] = statements.as_slice() else {
         return Err(CanonicalizeError::Unsupported(
             "Expected exactly one SELECT statement".to_string(),
         ));
-    }
-    let statement = statements.into_iter().next().ok_or_else(|| {
-        CanonicalizeError::Unsupported("Expected exactly one SELECT statement".to_string())
-    })?;
-    let where_expr = extract_where(&statement)?;
+    };
+    let where_expr = extract_where(statement)?;
     normalize_where_clause_inner(where_expr)
 }
 

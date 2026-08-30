@@ -19,5 +19,12 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "normalize_where_clause"
+path = "fuzz_targets/normalize_where_clause.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]
 members = ["."]
