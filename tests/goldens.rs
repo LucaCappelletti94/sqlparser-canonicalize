@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use sqlparser::dialect::{MySqlDialect, PostgreSqlDialect, SQLiteDialect};
-use sqlparser_canonicalize::{hash_canonical, normalize_sql};
+use sqlparser_canonicalize::{Canonicalizer, hash_canonical};
 
 #[derive(Clone, Copy, Debug)]
 enum DialectKind {
@@ -274,8 +274,8 @@ const GOLDENS: &[Golden] = &[
     Golden {
         dialect: DialectKind::PostgreSql,
         sql: "SELECT * FROM orders WHERE \"Status\" = 'paid'",
-        normalized: "('paid' = Status)",
-        hash: 315202535160635529392891495645651605580,
+        normalized: "(\"Status\" = 'paid')",
+        hash: 244578590542428046936922079652582969739,
     },
     Golden {
         dialect: DialectKind::MySql,
@@ -532,8 +532,8 @@ const GOLDENS: &[Golden] = &[
     Golden {
         dialect: DialectKind::MySql,
         sql: "SELECT * FROM orders WHERE `Status` = 'paid'",
-        normalized: "('paid' = Status)",
-        hash: 315202535160635529392891495645651605580,
+        normalized: "('paid' = `status`)",
+        hash: 177394572371791273191020032091017557400,
     },
     Golden {
         dialect: DialectKind::SQLite,
@@ -790,16 +790,16 @@ const GOLDENS: &[Golden] = &[
     Golden {
         dialect: DialectKind::SQLite,
         sql: "SELECT * FROM orders WHERE \"Status\" = 'paid'",
-        normalized: "('paid' = Status)",
-        hash: 315202535160635529392891495645651605580,
+        normalized: "(\"status\" = 'paid')",
+        hash: 112717352067792148743778502094369901298,
     },
 ];
 
 fn normalize_with_dialect(sql: &str, dialect: DialectKind) -> String {
     match dialect {
-        DialectKind::PostgreSql => normalize_sql(sql, &PostgreSqlDialect {}),
-        DialectKind::MySql => normalize_sql(sql, &MySqlDialect {}),
-        DialectKind::SQLite => normalize_sql(sql, &SQLiteDialect {}),
+        DialectKind::PostgreSql => Canonicalizer::new(&PostgreSqlDialect {}).normalize_sql(sql),
+        DialectKind::MySql => Canonicalizer::new(&MySqlDialect {}).normalize_sql(sql),
+        DialectKind::SQLite => Canonicalizer::new(&SQLiteDialect {}).normalize_sql(sql),
     }
     .unwrap()
 }

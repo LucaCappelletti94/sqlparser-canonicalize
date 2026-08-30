@@ -10,14 +10,21 @@
 
 ```rust
 use sqlparser::dialect::PostgreSqlDialect;
-use sqlparser_canonicalize::normalize_sql;
+use sqlparser_canonicalize::{Canonicalizer, hash_canonical};
 
-let normalized = normalize_sql(
-    "SELECT * FROM orders WHERE age > 18",
-    &PostgreSqlDialect {},
-)?;
-assert_eq!(normalized, "(age > 18)");
+let canonicalizer = Canonicalizer::new(&PostgreSqlDialect {});
+
+let normalized = canonicalizer.normalize_sql("SELECT * FROM orders WHERE status = 'paid'")?;
+assert_eq!(normalized, "('paid' = status)");
+
+// The same predicate written the other way round produces the same bytes, and so the same key.
+let commuted = canonicalizer.normalize_sql("SELECT * FROM orders WHERE 'paid' = status")?;
+assert_eq!(hash_canonical(&commuted), hash_canonical(&normalized));
 # Ok::<(), sqlparser_canonicalize::CanonicalizeError>(())
 ```
 
-The crate supports `no_std` with allocation. Normalization is O(n log n) for `AND` and `OR` chains because operands are sorted, and O(n) for other syntax tree shapes.
+The dialect belongs to the canonicalizer because it decides the answer: whether `"Status"` and `Status` are one column or two is a PostgreSQL question, not a SQL one.
+
+Normalization is O(n log n) for `AND` and `OR` chains because operands are sorted, and O(n) for other syntax tree shapes.
+
+The crate works without the standard library if you turn off default features, at the cost of the parser's stack protection, so that configuration can be crashed by deeply nested input and should only take SQL you trust.

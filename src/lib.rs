@@ -9,17 +9,26 @@ use thiserror::Error;
 
 mod canonicalize;
 
-pub use canonicalize::{hash_canonical, normalize_sql, normalize_where_clause};
+pub use canonicalize::{Canonicalizer, hash_canonical};
 
+/// Why a predicate could not be turned into canonical text.
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum CanonicalizeError {
-    #[error("SQL parse error at line {line}, column {column}: {message}")]
-    Parse {
-        line: usize,
-        column: usize,
-        message: String,
-    },
+    /// The SQL did not parse. The message comes from the parser.
+    #[error("SQL parse error: {0}")]
+    Parse(String),
+    /// The input was longer than the crate will accept. Shortening it may succeed.
+    #[error("SQL input is longer than {limit} bytes")]
+    InputTooLong { limit: usize },
+    /// The expression nested deeper than the crate will walk. Simplifying it may succeed.
+    #[error("Expression nests deeper than {limit} levels")]
+    TooDeep { limit: usize },
+    /// The predicate has no canonical spelling the parser can read back unchanged, so
+    /// hashing it would risk giving two different predicates one key.
+    #[error("Canonical text would not read back as itself: {0}")]
+    NotRoundTrippable(String),
+    /// Syntax this crate does not canonicalize.
     #[error("Unsupported SQL: {0}")]
     Unsupported(String),
 }

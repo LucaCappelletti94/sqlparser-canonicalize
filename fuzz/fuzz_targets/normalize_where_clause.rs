@@ -6,7 +6,7 @@ use sqlparser::dialect::{
     AnsiDialect, Dialect, GenericDialect, MySqlDialect, PostgreSqlDialect, SQLiteDialect,
 };
 use sqlparser::parser::Parser;
-use sqlparser_canonicalize::{normalize_sql, normalize_where_clause};
+use sqlparser_canonicalize::Canonicalizer;
 
 fn dialect(selector: u8) -> &'static dyn Dialect {
     match selector % 5 {
@@ -41,7 +41,9 @@ fuzz_target!(|data: &[u8]| {
         return;
     };
 
-    let Ok(canonical) = normalize_where_clause(select.selection.as_ref(), verify_dialect) else {
+    let Ok(canonical) =
+        Canonicalizer::new(verify_dialect).normalize_where_clause(select.selection.as_ref())
+    else {
         return;
     };
     let replay = if canonical == "TRUE" {
@@ -50,7 +52,9 @@ fuzz_target!(|data: &[u8]| {
         format!("SELECT * FROM t WHERE {canonical}")
     };
     assert_eq!(
-        normalize_sql(&replay, verify_dialect).unwrap(),
+        Canonicalizer::new(verify_dialect)
+            .normalize_sql(&replay)
+            .unwrap(),
         canonical,
         "accepted canonical text must read back as itself"
     );

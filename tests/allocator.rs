@@ -3,7 +3,7 @@ use std::hint::black_box;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use sqlparser::dialect::PostgreSqlDialect;
-use sqlparser_canonicalize::normalize_sql;
+use sqlparser_canonicalize::Canonicalizer;
 
 static ENABLED: AtomicBool = AtomicBool::new(false);
 static ALLOCATIONS: AtomicUsize = AtomicUsize::new(0);
@@ -33,10 +33,9 @@ static GLOBAL: CountingAllocator = CountingAllocator;
 fn measure(sql: &str) -> usize {
     ALLOCATIONS.store(0, Ordering::Relaxed);
     ENABLED.store(true, Ordering::Relaxed);
-    let normalized = black_box(normalize_sql(
-        black_box(sql),
-        black_box(&PostgreSqlDialect {}),
-    ))
+    let normalized = black_box(
+        Canonicalizer::new(black_box(&PostgreSqlDialect {})).normalize_sql(black_box(sql)),
+    )
     .unwrap();
     ENABLED.store(false, Ordering::Relaxed);
     black_box(normalized);
@@ -49,6 +48,7 @@ fn fixed_corpus_allocation_count_does_not_grow() {
     let _ = measure(sql);
     let counts = std::array::from_fn::<_, 16, _>(|_| measure(sql));
     // Two passes over the predicate, because the canonical text is parsed back to prove it
-    // reads as itself before it is returned.
-    assert_eq!(counts, [421; 16]);
+    // reads as itself before it is returned, plus one stack reservation per parse from the
+    // parser's recursion guard.
+    assert_eq!(counts, [423; 16]);
 }

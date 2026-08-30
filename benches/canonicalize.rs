@@ -4,7 +4,7 @@ use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use sqlparser::ast::{SetExpr, Statement};
 use sqlparser::dialect::PostgreSqlDialect;
 use sqlparser::parser::Parser;
-use sqlparser_canonicalize::{hash_canonical, normalize_sql, normalize_where_clause};
+use sqlparser_canonicalize::{Canonicalizer, hash_canonical};
 
 /// One case per predicate shape, so a regression names the shape that caused it.
 const CORPUS: &[(&str, &str)] = &[
@@ -62,7 +62,13 @@ fn shapes(c: &mut Criterion) {
     let mut group = c.benchmark_group("normalize_sql");
     for (name, sql) in CORPUS {
         group.bench_function(*name, |b| {
-            b.iter(|| black_box(normalize_sql(black_box(sql), &dialect).unwrap()));
+            b.iter(|| {
+                black_box(
+                    Canonicalizer::new(&dialect)
+                        .normalize_sql(black_box(sql))
+                        .unwrap(),
+                )
+            });
         });
     }
     group.finish();
@@ -74,11 +80,23 @@ fn sorting(c: &mut Criterion) {
     for items in [8usize, 64, 512] {
         let sql = wide_in_list(items);
         group.bench_with_input(BenchmarkId::new("in_list", items), &sql, |b, sql| {
-            b.iter(|| black_box(normalize_sql(black_box(sql), &dialect).unwrap()));
+            b.iter(|| {
+                black_box(
+                    Canonicalizer::new(&dialect)
+                        .normalize_sql(black_box(sql))
+                        .unwrap(),
+                )
+            });
         });
         let sql = long_boolean_chain(items);
         group.bench_with_input(BenchmarkId::new("and_chain", items), &sql, |b, sql| {
-            b.iter(|| black_box(normalize_sql(black_box(sql), &dialect).unwrap()));
+            b.iter(|| {
+                black_box(
+                    Canonicalizer::new(&dialect)
+                        .normalize_sql(black_box(sql))
+                        .unwrap(),
+                )
+            });
         });
     }
     group.finish();
@@ -90,14 +108,26 @@ fn entry_points(c: &mut Criterion) {
     let dialect = PostgreSqlDialect {};
     let sql = "SELECT * FROM t WHERE (a = 1 AND b = 2) OR (c = 3 AND d = 4) AND e IN (5, 6, 7)";
     let expr = where_expr(sql);
-    let canonical = normalize_sql(sql, &dialect).unwrap();
+    let canonical = Canonicalizer::new(&dialect).normalize_sql(sql).unwrap();
 
     let mut group = c.benchmark_group("entry_points");
     group.bench_function("normalize_sql", |b| {
-        b.iter(|| black_box(normalize_sql(black_box(sql), &dialect).unwrap()));
+        b.iter(|| {
+            black_box(
+                Canonicalizer::new(&dialect)
+                    .normalize_sql(black_box(sql))
+                    .unwrap(),
+            )
+        });
     });
     group.bench_function("normalize_where_clause", |b| {
-        b.iter(|| black_box(normalize_where_clause(Some(black_box(&expr)), &dialect).unwrap()));
+        b.iter(|| {
+            black_box(
+                Canonicalizer::new(&dialect)
+                    .normalize_where_clause(Some(black_box(&expr)))
+                    .unwrap(),
+            )
+        });
     });
     group.bench_function("parse_only", |b| {
         b.iter(|| black_box(Parser::parse_sql(&dialect, black_box(sql)).unwrap()));

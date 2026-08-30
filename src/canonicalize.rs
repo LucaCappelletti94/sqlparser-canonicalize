@@ -9,7 +9,7 @@ use sqlparser::ast::{
     BinaryOperator, Distinct, Expr, Ident, LimitClause, Query, Select, SelectModifiers, SetExpr,
     Statement, TableFactor, Value,
 };
-use sqlparser::dialect::Dialect;
+use sqlparser::dialect::{AnsiDialect, Dialect, MySqlDialect, PostgreSqlDialect, SQLiteDialect};
 use sqlparser::keywords::ALL_KEYWORDS;
 use sqlparser::parser::Parser;
 
@@ -20,73 +20,76 @@ const MAX_SQL_LEN: usize = 8192;
 /// Canonical text for a `SELECT` with no `WHERE` clause.
 const NO_FILTER: &str = "TRUE";
 
-/// Parses one `SELECT` and returns canonical text for its `WHERE` clause.
-///
-/// The canonical text is verified to survive a parse of itself, so a predicate whose
-/// canonical form would read back as something else is rejected instead of hashed.
-pub fn normalize_sql(sql: &str, dialect: &dyn Dialect) -> Result<String, CanonicalizeError> {
-    let canonical = normalize_sql_inner(sql, dialect)?;
-    verify_round_trip(&canonical, dialect)?;
-    Ok(canonical)
+impl<'a> Canonicalizer<'a> {
+    /// Parses one `SELECT` and returns canonical text for its `WHERE` clause.
+    ///
+    /// The canonical text is verified to survive a parse of itself, so a predicate whose
+    /// canonical form would read back as something else is rejected instead of hashed.
+    pub fn normalize_sql(&self, sql: &str) -> Result<String, CanonicalizeError> {
+        let canonical = normalize_sql_inner(sql, self)?;
+        confirm_reads_back_as_itself(canonical, self)
+    }
+
+    /// Canonicalizes a parsed `WHERE` clause in O(n log n) time for boolean chains and O(n)
+    /// otherwise.
+    ///
+    /// `where_expr` MUST have been parsed with this canonicalizer's dialect, which decides
+    /// how names fold and which reads the canonical text back to check it.
+    pub fn normalize_where_clause(
+        &self,
+        where_expr: Option<&Expr>,
+    ) -> Result<String, CanonicalizeError> {
+        let canonical = normalize_where_clause_inner(where_expr, self)?;
+        confirm_reads_back_as_itself(canonical, self)
+    }
 }
 
-/// Canonicalizes a parsed `WHERE` clause in O(n log n) time for boolean chains and O(n) otherwise.
-///
-/// `dialect` is the dialect the expression was parsed with, used to verify that the canonical
-/// text reads back unchanged.
-pub fn normalize_where_clause(
-    where_expr: Option<&Expr>,
-    dialect: &dyn Dialect,
+fn normalize_sql_inner(
+    sql: &str,
+    context: &Canonicalizer<'_>,
 ) -> Result<String, CanonicalizeError> {
-    let canonical = normalize_where_clause_inner(where_expr)?;
-    verify_round_trip(&canonical, dialect)?;
-    Ok(canonical)
-}
-
-fn normalize_sql_inner(sql: &str, dialect: &dyn Dialect) -> Result<String, CanonicalizeError> {
     if sql.len() > MAX_SQL_LEN {
-        return Err(CanonicalizeError::Unsupported(
-            "SQL input is too long".to_string(),
-        ));
+        return Err(CanonicalizeError::InputTooLong { limit: MAX_SQL_LEN });
     }
     check_sql_sanity(sql)?;
 
-    let statements = Parser::parse_sql(dialect, sql).map_err(|error| CanonicalizeError::Parse {
-        line: 1,
-        column: 0,
-        message: error.to_string(),
-    })?;
+    let statements = Parser::parse_sql(context.dialect, sql)
+        .map_err(|error| CanonicalizeError::Parse(error.to_string()))?;
     let [statement] = statements.as_slice() else {
         return Err(CanonicalizeError::Unsupported(
             "Expected exactly one SELECT statement".to_string(),
         ));
     };
     let where_expr = extract_where(statement)?;
-    normalize_where_clause_inner(where_expr)
+    normalize_where_clause_inner(where_expr, context)
 }
 
-fn normalize_where_clause_inner(where_expr: Option<&Expr>) -> Result<String, CanonicalizeError> {
+fn normalize_where_clause_inner(
+    where_expr: Option<&Expr>,
+    context: &Canonicalizer<'_>,
+) -> Result<String, CanonicalizeError> {
     where_expr.map_or_else(
         || Ok(NO_FILTER.to_string()),
-        |expr| normalize_expr_inner(expr, 0, false),
+        |expr| normalize_expr_inner(expr, 0, false, context),
     )
 }
 
-/// Rejects canonical text that a second pass would not reproduce byte for byte.
+/// Returns the canonical text only if a second pass reproduces it byte for byte.
 ///
 /// Canonical text is a hash key, so text that reads back as a different predicate would
 /// give two distinct predicates one hash.
-fn verify_round_trip(canonical: &str, dialect: &dyn Dialect) -> Result<(), CanonicalizeError> {
+fn confirm_reads_back_as_itself(
+    canonical: String,
+    context: &Canonicalizer<'_>,
+) -> Result<String, CanonicalizeError> {
     let replay = if canonical == NO_FILTER {
         "SELECT * FROM t".to_string()
     } else {
         format!("SELECT * FROM t WHERE {canonical}")
     };
-    match normalize_sql_inner(&replay, dialect) {
-        Ok(again) if again == canonical => Ok(()),
-        _ => Err(CanonicalizeError::Unsupported(
-            "Canonical text does not survive a round trip".to_string(),
-        )),
+    match normalize_sql_inner(&replay, context) {
+        Ok(again) if again == canonical => Ok(canonical),
+        _ => Err(CanonicalizeError::NotRoundTrippable(canonical)),
     }
 }
 
@@ -146,9 +149,9 @@ fn check_sql_sanity(sql: &str) -> Result<(), CanonicalizeError> {
             || bracket_depth > MAX_EXPR_DEPTH
             || consecutive_ops > MAX_EXPR_DEPTH
         {
-            return Err(CanonicalizeError::Unsupported(
-                "Expression nesting is too deep".to_string(),
-            ));
+            return Err(CanonicalizeError::TooDeep {
+                limit: MAX_EXPR_DEPTH,
+            });
         }
     }
 
@@ -310,11 +313,12 @@ fn normalize_expr_inner(
     expr: &Expr,
     depth: usize,
     tight_parent: bool,
+    context: &Canonicalizer<'_>,
 ) -> Result<String, CanonicalizeError> {
     if depth > MAX_EXPR_DEPTH {
-        return Err(CanonicalizeError::Unsupported(
-            "Expression nesting is too deep".to_string(),
-        ));
+        return Err(CanonicalizeError::TooDeep {
+            limit: MAX_EXPR_DEPTH,
+        });
     }
 
     Ok(match expr {
@@ -324,7 +328,7 @@ fn normalize_expr_inner(
                 children.extend(collect_flat_children(right, op));
                 let mut child_text: Vec<String> = children
                     .iter()
-                    .map(|child| normalize_expr_inner(child, depth + 1, false))
+                    .map(|child| normalize_expr_inner(child, depth + 1, false, context))
                     .collect::<Result<_, _>>()?;
                 child_text.sort();
                 let operator = operator_text(op)?;
@@ -333,8 +337,8 @@ fn normalize_expr_inner(
                     .reduce(|left, right| format!("({left} {operator} {right})"))
                     .unwrap_or_default()
             } else {
-                let left = normalize_expr_inner(left, depth + 1, true)?;
-                let right = normalize_expr_inner(right, depth + 1, true)?;
+                let left = normalize_expr_inner(left, depth + 1, true, context)?;
+                let right = normalize_expr_inner(right, depth + 1, true, context)?;
                 let (left, right) = if is_commutative(op) && left > right {
                     (right, left)
                 } else {
@@ -345,7 +349,7 @@ fn normalize_expr_inner(
         }
         Expr::UnaryOp { op, expr } => {
             let operator = unary_operator_text(op)?;
-            let operand = normalize_expr_inner(expr, depth + 1, true)?;
+            let operand = normalize_expr_inner(expr, depth + 1, true, context)?;
             // NOT binds looser than any operator that can enclose it, so a nested NOT
             // reparses against the wrong operand without parentheses.
             if tight_parent && matches!(op, sqlparser::ast::UnaryOperator::Not) {
@@ -354,11 +358,14 @@ fn normalize_expr_inner(
                 format!("{operator} {operand}")
             }
         }
-        Expr::IsNull(expr) => format!("{} IS NULL", normalize_expr_inner(expr, depth + 1, true)?),
+        Expr::IsNull(expr) => format!(
+            "{} IS NULL",
+            normalize_expr_inner(expr, depth + 1, true, context)?
+        ),
         Expr::IsNotNull(expr) => {
             format!(
                 "{} IS NOT NULL",
-                normalize_expr_inner(expr, depth + 1, true)?
+                normalize_expr_inner(expr, depth + 1, true, context)?
             )
         }
         Expr::InList {
@@ -368,13 +375,13 @@ fn normalize_expr_inner(
         } => {
             let mut items: Vec<String> = list
                 .iter()
-                .map(|item| normalize_expr_inner(item, depth + 1, true))
+                .map(|item| normalize_expr_inner(item, depth + 1, true, context))
                 .collect::<Result<_, _>>()?;
             items.sort();
             let not = if *negated { "NOT " } else { "" };
             format!(
                 "{} {not}IN ({})",
-                normalize_expr_inner(expr, depth + 1, true)?,
+                normalize_expr_inner(expr, depth + 1, true, context)?,
                 items.join(", ")
             )
         }
@@ -386,7 +393,7 @@ fn normalize_expr_inner(
             let not = if *negated { "NOT " } else { "" };
             format!(
                 "{} {not}IN ({subquery})",
-                normalize_expr_inner(expr, depth + 1, true)?
+                normalize_expr_inner(expr, depth + 1, true, context)?
             )
         }
         Expr::Between {
@@ -398,9 +405,9 @@ fn normalize_expr_inner(
             let not = if *negated { "NOT " } else { "" };
             format!(
                 "{} {not}BETWEEN {} AND {}",
-                normalize_expr_inner(expr, depth + 1, true)?,
-                normalize_expr_inner(low, depth + 1, true)?,
-                normalize_expr_inner(high, depth + 1, true)?
+                normalize_expr_inner(expr, depth + 1, true, context)?,
+                normalize_expr_inner(low, depth + 1, true, context)?,
+                normalize_expr_inner(high, depth + 1, true, context)?
             )
         }
         Expr::Like {
@@ -416,8 +423,8 @@ fn normalize_expr_inner(
                 .map_or_else(String::new, |value| format!(" ESCAPE {value}"));
             format!(
                 "{} {not}LIKE {}{escape}",
-                normalize_expr_inner(expr, depth + 1, true)?,
-                normalize_expr_inner(pattern, depth + 1, true)?
+                normalize_expr_inner(expr, depth + 1, true, context)?,
+                normalize_expr_inner(pattern, depth + 1, true, context)?
             )
         }
         Expr::ILike {
@@ -433,15 +440,15 @@ fn normalize_expr_inner(
                 .map_or_else(String::new, |value| format!(" ESCAPE {value}"));
             format!(
                 "{} {not}ILIKE {}{escape}",
-                normalize_expr_inner(expr, depth + 1, true)?,
-                normalize_expr_inner(pattern, depth + 1, true)?
+                normalize_expr_inner(expr, depth + 1, true, context)?,
+                normalize_expr_inner(pattern, depth + 1, true, context)?
             )
         }
-        Expr::Nested(inner) => normalize_expr_inner(inner, depth + 1, tight_parent)?,
-        Expr::Identifier(identifier) => identifier_text(identifier)?,
+        Expr::Nested(inner) => normalize_expr_inner(inner, depth + 1, tight_parent, context)?,
+        Expr::Identifier(identifier) => identifier_text(identifier, context)?,
         Expr::CompoundIdentifier(parts) => parts
             .iter()
-            .map(identifier_text)
+            .map(|part| identifier_text(part, context))
             .collect::<Result<Vec<_>, _>>()?
             .join("."),
         Expr::Value(value) => {
@@ -453,18 +460,118 @@ fn normalize_expr_inner(
     })
 }
 
-fn identifier_text(identifier: &Ident) -> Result<String, CanonicalizeError> {
-    if identifier.quote_style.is_some() && identifier_needs_quotes(&identifier.value) {
-        let quote = identifier.quote_style.unwrap_or('"');
-        if !quoting_survives_printing(&identifier.value, quote) {
-            return Err(CanonicalizeError::Unsupported(
-                "Quoted identifier cannot be printed without changing its value".to_string(),
-            ));
-        }
-        Ok(format!("{identifier}"))
-    } else {
-        Ok(identifier.value.clone())
+/// How a dialect decides whether two spellings of a name are the same column.
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum Folding {
+    /// An unquoted name folds to lower case, a quoted one keeps its spelling.
+    LowerUnquoted,
+    /// An unquoted name folds to upper case, a quoted one keeps its spelling.
+    UpperUnquoted,
+    /// Every spelling of the same letters is one name.
+    CaseInsensitive,
+    /// Unknown rule, so keep the name exactly as written and never merge two spellings.
+    Exact,
+}
+
+/// Canonicalizes predicates under one SQL dialect.
+///
+/// The dialect decides how identifiers fold, so it decides which two spellings mean one
+/// column. Build this from the dialect that parsed whatever you hand it.
+pub struct Canonicalizer<'a> {
+    dialect: &'a dyn Dialect,
+    folding: Folding,
+}
+
+impl<'a> Canonicalizer<'a> {
+    /// Reads the folding rule for `dialect`.
+    #[must_use]
+    pub fn new(dialect: &'a dyn Dialect) -> Self {
+        let folding = if dialect.is::<PostgreSqlDialect>() {
+            Folding::LowerUnquoted
+        } else if dialect.is::<AnsiDialect>() {
+            Folding::UpperUnquoted
+        } else if dialect.is::<MySqlDialect>() || dialect.is::<SQLiteDialect>() {
+            Folding::CaseInsensitive
+        } else {
+            Folding::Exact
+        };
+        Self { dialect, folding }
     }
+}
+
+/// Resolves an identifier to the name the database would see, then spells it the one way
+/// that reads back as that same name.
+fn identifier_text(
+    identifier: &Ident,
+    context: &Canonicalizer<'_>,
+) -> Result<String, CanonicalizeError> {
+    let quoted = identifier.quote_style.is_some();
+    // Case folding rules are stated for ASCII. Anything else keeps its exact spelling,
+    // because merging two names the database might separate is the unsafe direction.
+    let folding = if identifier.value.is_ascii() {
+        context.folding
+    } else {
+        Folding::Exact
+    };
+    let resolved = match folding {
+        Folding::LowerUnquoted if !quoted => identifier.value.to_ascii_lowercase(),
+        Folding::UpperUnquoted if !quoted => identifier.value.to_ascii_uppercase(),
+        Folding::CaseInsensitive => identifier.value.to_ascii_lowercase(),
+        _ => identifier.value.clone(),
+    };
+
+    if bare_spelling_is_faithful(&resolved, quoted, folding) {
+        return Ok(resolved);
+    }
+    let quote = identifier.quote_style.unwrap_or('"');
+    if !quoting_survives_printing(&resolved, quote) {
+        return Err(CanonicalizeError::NotRoundTrippable(resolved));
+    }
+    Ok(format!("{quote}{resolved}{quote}"))
+}
+
+/// Reports whether writing `name` without quotes reads back as `name` itself.
+///
+/// The answer must depend only on the name, never on how canonicalization is going, or one
+/// predicate could end up with two spellings and so two keys.
+fn bare_spelling_is_faithful(name: &str, quoted: bool, folding: Folding) -> bool {
+    if !quoted {
+        // This dialect already accepted the name without quotes, and folding only applied the
+        // change the dialect makes itself, so writing it bare reads back as the same name.
+        return true;
+    }
+    if !is_plain_non_keyword(name) {
+        return false;
+    }
+    match folding {
+        // Dropping the quotes hands the name to the dialect's folding, so it may only go bare
+        // when it is already in the folded form.
+        Folding::LowerUnquoted => !name.bytes().any(|byte| byte.is_ascii_uppercase()),
+        Folding::UpperUnquoted => !name.bytes().any(|byte| byte.is_ascii_lowercase()),
+        Folding::CaseInsensitive => true,
+        Folding::Exact => false,
+    }
+}
+
+/// Reports whether `name` is a bare word no dialect reads as a keyword.
+///
+/// Whether a given keyword may still name a column is dialect and position specific, so this
+/// errs towards keeping the quotes. The cost is that a quoted keyword does not share a key
+/// with its unquoted spelling, which splits one column into two entries rather than merging
+/// two columns into one.
+fn is_plain_non_keyword(name: &str) -> bool {
+    let mut characters = name.chars();
+    let Some(first) = characters.next() else {
+        return false;
+    };
+    if !(first.is_ascii_alphabetic() || first == '_')
+        || !characters.all(|character| character.is_ascii_alphanumeric() || character == '_')
+    {
+        return false;
+    }
+    ALL_KEYWORDS
+        .binary_search(&name.to_ascii_uppercase().as_str())
+        .is_err()
 }
 
 /// Rejects a literal the parser cannot print without changing its value.
@@ -479,8 +586,8 @@ fn reject_lossy_quoting(value: &Value) -> Result<(), CanonicalizeError> {
     if intact {
         Ok(())
     } else {
-        Err(CanonicalizeError::Unsupported(
-            "String literal cannot be printed without changing its value".to_string(),
+        Err(CanonicalizeError::NotRoundTrippable(
+            "string literal".to_string(),
         ))
     }
 }
@@ -501,22 +608,6 @@ fn quoting_survives_printing(text: &str, quote: char) -> bool {
         previous = character;
     }
     true
-}
-
-fn identifier_needs_quotes(value: &str) -> bool {
-    let mut characters = value.chars();
-    let Some(first) = characters.next() else {
-        return true;
-    };
-    if !(first.is_ascii_alphabetic() || first == '_')
-        || !characters.all(|character| character.is_ascii_alphanumeric() || character == '_')
-    {
-        return true;
-    }
-
-    let uppercase = value.to_ascii_uppercase();
-    // STATUS is pinned unquoted and reparses as an identifier in every supported dialect.
-    uppercase != "STATUS" && ALL_KEYWORDS.binary_search(&uppercase.as_str()).is_ok()
 }
 
 fn collect_flat_children<'a>(expr: &'a Expr, operator: &BinaryOperator) -> Vec<&'a Expr> {
