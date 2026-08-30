@@ -1,12 +1,12 @@
 use sqlparser::dialect::PostgreSqlDialect;
-use sqlparser_canonicalize::{CanonicalizeError, hash_canonical, normalize_sql};
+use sqlparser_canonicalize::{CanonicalizeError, Canonicalizer, hash_canonical};
 
 #[test]
 fn test_normalize_simple() {
     let dialect = PostgreSqlDialect {};
 
     let sql = "SELECT * FROM t WHERE age > 18";
-    let result = normalize_sql(sql, &dialect);
+    let result = Canonicalizer::new(&dialect).normalize_sql(sql);
     assert!(result.is_ok());
 
     let normalized = result.unwrap();
@@ -22,8 +22,8 @@ fn test_normalize_commutative_and() {
     let sql1 = "SELECT * FROM t WHERE a = 1 AND b = 2";
     let sql2 = "SELECT * FROM t WHERE b = 2 AND a = 1";
 
-    let norm1 = normalize_sql(sql1, &dialect).unwrap();
-    let norm2 = normalize_sql(sql2, &dialect).unwrap();
+    let norm1 = Canonicalizer::new(&dialect).normalize_sql(sql1).unwrap();
+    let norm2 = Canonicalizer::new(&dialect).normalize_sql(sql2).unwrap();
 
     assert_eq!(norm1, norm2);
 }
@@ -35,8 +35,8 @@ fn test_normalize_commutative_or() {
     let sql1 = "SELECT * FROM t WHERE a = 1 OR b = 2";
     let sql2 = "SELECT * FROM t WHERE b = 2 OR a = 1";
 
-    let norm1 = normalize_sql(sql1, &dialect).unwrap();
-    let norm2 = normalize_sql(sql2, &dialect).unwrap();
+    let norm1 = Canonicalizer::new(&dialect).normalize_sql(sql1).unwrap();
+    let norm2 = Canonicalizer::new(&dialect).normalize_sql(sql2).unwrap();
 
     assert_eq!(norm1, norm2);
 }
@@ -48,8 +48,8 @@ fn test_normalize_in_list_sorted() {
     let sql1 = "SELECT * FROM t WHERE x IN (1, 2, 3)";
     let sql2 = "SELECT * FROM t WHERE x IN (3, 1, 2)";
 
-    let norm1 = normalize_sql(sql1, &dialect).unwrap();
-    let norm2 = normalize_sql(sql2, &dialect).unwrap();
+    let norm1 = Canonicalizer::new(&dialect).normalize_sql(sql1).unwrap();
+    let norm2 = Canonicalizer::new(&dialect).normalize_sql(sql2).unwrap();
 
     assert_eq!(norm1, norm2);
 }
@@ -58,16 +58,14 @@ fn test_normalize_in_list_sorted() {
 fn a_membership_term_normalizes_the_same_under_two_spellings() {
     let dialect = PostgreSqlDialect {};
 
-    let one = normalize_sql(
-        "SELECT * FROM t WHERE x IN (SELECT id FROM m WHERE owner = 'a')",
-        &dialect,
-    )
-    .unwrap();
-    let two = normalize_sql(
-        "SELECT   *  FROM t\n  where   x   in   ( select id from m where owner = 'a' )",
-        &dialect,
-    )
-    .unwrap();
+    let one = Canonicalizer::new(&dialect)
+        .normalize_sql("SELECT * FROM t WHERE x IN (SELECT id FROM m WHERE owner = 'a')")
+        .unwrap();
+    let two = Canonicalizer::new(&dialect)
+        .normalize_sql(
+            "SELECT   *  FROM t\n  where   x   in   ( select id from m where owner = 'a' )",
+        )
+        .unwrap();
 
     assert_eq!(one, two, "one filter, two spellings, one predicate");
     assert!(
@@ -79,7 +77,7 @@ fn a_membership_term_normalizes_the_same_under_two_spellings() {
 #[test]
 fn two_different_membership_terms_are_two_predicates() {
     let dialect = PostgreSqlDialect {};
-    let norm = |sql: &str| normalize_sql(sql, &dialect).unwrap();
+    let norm = |sql: &str| Canonicalizer::new(&dialect).normalize_sql(sql).unwrap();
 
     let base = norm("SELECT * FROM t WHERE x IN (SELECT id FROM m WHERE owner = 'a')");
 
@@ -104,7 +102,7 @@ fn test_normalize_no_where() {
     let dialect = PostgreSqlDialect {};
 
     let sql = "SELECT * FROM t";
-    let result = normalize_sql(sql, &dialect);
+    let result = Canonicalizer::new(&dialect).normalize_sql(sql);
     assert!(result.is_ok());
 
     let normalized = result.unwrap();
@@ -148,8 +146,8 @@ fn test_normalize_nested_parentheses() {
     let sql1 = "SELECT * FROM t WHERE ((age > 18))";
     let sql2 = "SELECT * FROM t WHERE age > 18";
 
-    let norm1 = normalize_sql(sql1, &dialect).unwrap();
-    let norm2 = normalize_sql(sql2, &dialect).unwrap();
+    let norm1 = Canonicalizer::new(&dialect).normalize_sql(sql1).unwrap();
+    let norm2 = Canonicalizer::new(&dialect).normalize_sql(sql2).unwrap();
 
     assert_eq!(norm1, norm2);
 }
@@ -161,8 +159,8 @@ fn test_normalize_preserves_order_noncommutative() {
     let sql1 = "SELECT * FROM t WHERE a < b";
     let sql2 = "SELECT * FROM t WHERE b < a";
 
-    let norm1 = normalize_sql(sql1, &dialect).unwrap();
-    let norm2 = normalize_sql(sql2, &dialect).unwrap();
+    let norm1 = Canonicalizer::new(&dialect).normalize_sql(sql1).unwrap();
+    let norm2 = Canonicalizer::new(&dialect).normalize_sql(sql2).unwrap();
 
     assert_ne!(norm1, norm2);
 }
@@ -172,7 +170,7 @@ fn test_normalize_error_parse_failure() {
     let dialect = PostgreSqlDialect {};
 
     let invalid_sql = "NOT VALID SQL ;;;";
-    let result = normalize_sql(invalid_sql, &dialect);
+    let result = Canonicalizer::new(&dialect).normalize_sql(invalid_sql);
 
     assert!(matches!(result, Err(CanonicalizeError::Parse { .. })));
 }
@@ -182,7 +180,7 @@ fn test_normalize_error_multiple_statements() {
     let dialect = PostgreSqlDialect {};
 
     let sql = "SELECT * FROM t WHERE a = 1; SELECT * FROM t WHERE b = 2";
-    let result = normalize_sql(sql, &dialect);
+    let result = Canonicalizer::new(&dialect).normalize_sql(sql);
 
     assert!(matches!(result, Err(CanonicalizeError::Unsupported(_))));
 }
@@ -190,7 +188,9 @@ fn test_normalize_error_multiple_statements() {
 #[test]
 fn test_normalize_rejects_unbalanced_open_parens() {
     let dialect = PostgreSqlDialect {};
-    let err = normalize_sql("SELECT * FROM t WHERE ((((a = 1", &dialect).unwrap_err();
+    let err = Canonicalizer::new(&dialect)
+        .normalize_sql("SELECT * FROM t WHERE ((((a = 1")
+        .unwrap_err();
     assert!(matches!(err, CanonicalizeError::Unsupported(ref m) if m.contains("Unbalanced")));
 }
 
@@ -199,7 +199,7 @@ fn test_normalize_no_where_clause() {
     let dialect = PostgreSqlDialect {};
 
     let sql = "SELECT * FROM t";
-    let result = normalize_sql(sql, &dialect).unwrap();
+    let result = Canonicalizer::new(&dialect).normalize_sql(sql).unwrap();
 
     assert_eq!(result, "TRUE");
 }
@@ -210,13 +210,13 @@ fn test_normalize_all_operators() {
 
     for op in &["=", "!=", "<", ">", "<=", ">="] {
         let sql = format!("SELECT * FROM t WHERE a {} b", op);
-        let result = normalize_sql(&sql, &dialect);
+        let result = Canonicalizer::new(&dialect).normalize_sql(&sql);
         assert!(result.is_ok(), "Failed on operator: {}", op);
     }
 
     for op in &["AND", "OR"] {
         let sql = format!("SELECT * FROM t WHERE a = 1 {} b = 2", op);
-        let result = normalize_sql(&sql, &dialect);
+        let result = Canonicalizer::new(&dialect).normalize_sql(&sql);
         assert!(result.is_ok(), "Failed on operator: {}", op);
     }
 }
@@ -227,7 +227,7 @@ fn test_normalize_arithmetic_operators() {
 
     for op in &["+", "-", "*", "/", "%"] {
         let sql = format!("SELECT * FROM t WHERE a {} b > 10", op);
-        let result = normalize_sql(&sql, &dialect);
+        let result = Canonicalizer::new(&dialect).normalize_sql(&sql);
         assert!(result.is_ok(), "Failed on arithmetic operator: {}", op);
     }
 }
@@ -239,8 +239,8 @@ fn test_normalize_not_operator() {
     let sql1 = "SELECT * FROM t WHERE NOT (a = 1)";
     let sql2 = "SELECT * FROM t WHERE a != 1";
 
-    let norm1 = normalize_sql(sql1, &dialect).unwrap();
-    let norm2 = normalize_sql(sql2, &dialect).unwrap();
+    let norm1 = Canonicalizer::new(&dialect).normalize_sql(sql1).unwrap();
+    let norm2 = Canonicalizer::new(&dialect).normalize_sql(sql2).unwrap();
 
     assert_ne!(norm1, norm2);
 }
@@ -250,7 +250,7 @@ fn test_normalize_complex_nested_expression() {
     let dialect = PostgreSqlDialect {};
 
     let sql = "SELECT * FROM t WHERE ((a = 1 AND b = 2) OR (c = 3 AND d = 4)) AND e = 5";
-    let result = normalize_sql(sql, &dialect);
+    let result = Canonicalizer::new(&dialect).normalize_sql(sql);
 
     assert!(result.is_ok());
 }
@@ -262,8 +262,8 @@ fn test_normalize_in_list_order() {
     let sql1 = "SELECT * FROM t WHERE status IN ('active', 'pending', 'processing')";
     let sql2 = "SELECT * FROM t WHERE status IN ('processing', 'active', 'pending')";
 
-    let norm1 = normalize_sql(sql1, &dialect).unwrap();
-    let norm2 = normalize_sql(sql2, &dialect).unwrap();
+    let norm1 = Canonicalizer::new(&dialect).normalize_sql(sql1).unwrap();
+    let norm2 = Canonicalizer::new(&dialect).normalize_sql(sql2).unwrap();
 
     let _ = (norm1, norm2);
 }
@@ -297,7 +297,7 @@ fn test_hash_long_string() {
 fn test_normalize_error_multiple_tables() {
     let dialect = PostgreSqlDialect {};
     let sql = "SELECT * FROM t1, t2 WHERE a = 1";
-    let result = normalize_sql(sql, &dialect);
+    let result = Canonicalizer::new(&dialect).normalize_sql(sql);
     assert!(matches!(result, Err(CanonicalizeError::Unsupported(_))));
     if let Err(CanonicalizeError::Unsupported(msg)) = result {
         assert!(msg.contains("Exactly one table"));
@@ -308,7 +308,7 @@ fn test_normalize_error_multiple_tables() {
 fn test_normalize_error_joins() {
     let dialect = PostgreSqlDialect {};
     let sql = "SELECT * FROM t1 JOIN t2 ON t1.id = t2.id WHERE a = 1";
-    let result = normalize_sql(sql, &dialect);
+    let result = Canonicalizer::new(&dialect).normalize_sql(sql);
     assert!(matches!(result, Err(CanonicalizeError::Unsupported(_))));
     if let Err(CanonicalizeError::Unsupported(msg)) = result {
         assert!(msg.contains("JOINs not supported"));
@@ -319,7 +319,7 @@ fn test_normalize_error_joins() {
 fn test_normalize_error_derived_table() {
     let dialect = PostgreSqlDialect {};
     let sql = "SELECT * FROM (SELECT * FROM t1) AS d WHERE d.a = 1";
-    let result = normalize_sql(sql, &dialect);
+    let result = Canonicalizer::new(&dialect).normalize_sql(sql);
     assert!(matches!(result, Err(CanonicalizeError::Unsupported(_))));
     if let Err(CanonicalizeError::Unsupported(msg)) = result {
         assert!(msg.contains("Subqueries and derived tables not supported"));
@@ -331,15 +331,15 @@ fn test_normalize_error_non_select_query() {
     let dialect = PostgreSqlDialect {};
 
     let insert_sql = "INSERT INTO t VALUES (1, 2)";
-    let result = normalize_sql(insert_sql, &dialect);
+    let result = Canonicalizer::new(&dialect).normalize_sql(insert_sql);
     assert!(matches!(result, Err(CanonicalizeError::Unsupported(_))));
 
     let update_sql = "UPDATE t SET a = 1";
-    let result = normalize_sql(update_sql, &dialect);
+    let result = Canonicalizer::new(&dialect).normalize_sql(update_sql);
     assert!(matches!(result, Err(CanonicalizeError::Unsupported(_))));
 
     let delete_sql = "DELETE FROM t WHERE a = 1";
-    let result = normalize_sql(delete_sql, &dialect);
+    let result = Canonicalizer::new(&dialect).normalize_sql(delete_sql);
     assert!(matches!(result, Err(CanonicalizeError::Unsupported(_))));
 }
 
@@ -347,7 +347,7 @@ fn test_normalize_error_non_select_query() {
 fn test_normalize_is_null() {
     let dialect = PostgreSqlDialect {};
     let sql = "SELECT * FROM t WHERE age IS NULL";
-    let result = normalize_sql(sql, &dialect).unwrap();
+    let result = Canonicalizer::new(&dialect).normalize_sql(sql).unwrap();
     assert!(result.contains("IS NULL"));
 }
 
@@ -355,7 +355,7 @@ fn test_normalize_is_null() {
 fn test_normalize_is_not_null() {
     let dialect = PostgreSqlDialect {};
     let sql = "SELECT * FROM t WHERE age IS NOT NULL";
-    let result = normalize_sql(sql, &dialect).unwrap();
+    let result = Canonicalizer::new(&dialect).normalize_sql(sql).unwrap();
     assert!(result.contains("IS NOT NULL"));
 }
 
@@ -363,7 +363,7 @@ fn test_normalize_is_not_null() {
 fn test_normalize_between() {
     let dialect = PostgreSqlDialect {};
     let sql = "SELECT * FROM t WHERE age BETWEEN 18 AND 65";
-    let result = normalize_sql(sql, &dialect).unwrap();
+    let result = Canonicalizer::new(&dialect).normalize_sql(sql).unwrap();
     assert!(result.contains("BETWEEN"));
     assert!(result.contains("18"));
     assert!(result.contains("65"));
@@ -373,7 +373,7 @@ fn test_normalize_between() {
 fn test_normalize_not_between() {
     let dialect = PostgreSqlDialect {};
     let sql = "SELECT * FROM t WHERE age NOT BETWEEN 18 AND 65";
-    let result = normalize_sql(sql, &dialect).unwrap();
+    let result = Canonicalizer::new(&dialect).normalize_sql(sql).unwrap();
     assert!(result.contains("NOT BETWEEN"));
 }
 
@@ -381,7 +381,7 @@ fn test_normalize_not_between() {
 fn test_normalize_like() {
     let dialect = PostgreSqlDialect {};
     let sql = "SELECT * FROM t WHERE name LIKE 'John%'";
-    let result = normalize_sql(sql, &dialect).unwrap();
+    let result = Canonicalizer::new(&dialect).normalize_sql(sql).unwrap();
     assert!(result.contains("LIKE"));
 }
 
@@ -389,7 +389,7 @@ fn test_normalize_like() {
 fn test_normalize_not_like() {
     let dialect = PostgreSqlDialect {};
     let sql = "SELECT * FROM t WHERE name NOT LIKE 'John%'";
-    let result = normalize_sql(sql, &dialect).unwrap();
+    let result = Canonicalizer::new(&dialect).normalize_sql(sql).unwrap();
     assert!(result.contains("NOT LIKE"));
 }
 
@@ -397,7 +397,7 @@ fn test_normalize_not_like() {
 fn test_normalize_like_with_escape() {
     let dialect = PostgreSqlDialect {};
     let sql = "SELECT * FROM t WHERE name LIKE 'John\\%' ESCAPE '\\'";
-    let result = normalize_sql(sql, &dialect).unwrap();
+    let result = Canonicalizer::new(&dialect).normalize_sql(sql).unwrap();
     assert!(result.contains("LIKE"));
     assert!(result.contains("ESCAPE"));
 }
@@ -406,7 +406,7 @@ fn test_normalize_like_with_escape() {
 fn test_normalize_ilike() {
     let dialect = PostgreSqlDialect {};
     let sql = "SELECT * FROM t WHERE name ILIKE 'john%'";
-    let result = normalize_sql(sql, &dialect).unwrap();
+    let result = Canonicalizer::new(&dialect).normalize_sql(sql).unwrap();
     assert!(result.contains("ILIKE"));
 }
 
@@ -414,7 +414,7 @@ fn test_normalize_ilike() {
 fn test_normalize_not_ilike() {
     let dialect = PostgreSqlDialect {};
     let sql = "SELECT * FROM t WHERE name NOT ILIKE 'john%'";
-    let result = normalize_sql(sql, &dialect).unwrap();
+    let result = Canonicalizer::new(&dialect).normalize_sql(sql).unwrap();
     assert!(result.contains("NOT ILIKE"));
 }
 
@@ -422,7 +422,7 @@ fn test_normalize_not_ilike() {
 fn test_normalize_ilike_with_escape() {
     let dialect = PostgreSqlDialect {};
     let sql = "SELECT * FROM t WHERE name ILIKE 'john\\%' ESCAPE '\\'";
-    let result = normalize_sql(sql, &dialect).unwrap();
+    let result = Canonicalizer::new(&dialect).normalize_sql(sql).unwrap();
     assert!(result.contains("ILIKE"));
     assert!(result.contains("ESCAPE"));
 }
@@ -431,7 +431,7 @@ fn test_normalize_ilike_with_escape() {
 fn test_normalize_compound_identifier() {
     let dialect = PostgreSqlDialect {};
     let sql = "SELECT * FROM t WHERE schema.table.column = 1";
-    let result = normalize_sql(sql, &dialect).unwrap();
+    let result = Canonicalizer::new(&dialect).normalize_sql(sql).unwrap();
     assert!(result.contains("schema.table.column"));
 }
 
@@ -439,7 +439,7 @@ fn test_normalize_compound_identifier() {
 fn test_normalize_unary_plus() {
     let dialect = PostgreSqlDialect {};
     let sql = "SELECT * FROM t WHERE +age = 10";
-    let result = normalize_sql(sql, &dialect).unwrap();
+    let result = Canonicalizer::new(&dialect).normalize_sql(sql).unwrap();
     assert!(result.contains("+"));
 }
 
@@ -447,7 +447,7 @@ fn test_normalize_unary_plus() {
 fn test_normalize_unary_minus() {
     let dialect = PostgreSqlDialect {};
     let sql = "SELECT * FROM t WHERE -balance > 100";
-    let result = normalize_sql(sql, &dialect).unwrap();
+    let result = Canonicalizer::new(&dialect).normalize_sql(sql).unwrap();
     assert!(result.contains("-"));
 }
 
@@ -455,7 +455,7 @@ fn test_normalize_unary_minus() {
 fn test_normalize_not_in_list() {
     let dialect = PostgreSqlDialect {};
     let sql = "SELECT * FROM t WHERE status NOT IN ('active', 'pending')";
-    let result = normalize_sql(sql, &dialect).unwrap();
+    let result = Canonicalizer::new(&dialect).normalize_sql(sql).unwrap();
     assert!(result.contains("NOT IN"));
 }
 
@@ -464,7 +464,7 @@ fn test_error_set_operations() {
     let dialect = PostgreSqlDialect {};
 
     let sql = "SELECT * FROM t WHERE a = 1 UNION SELECT * FROM t WHERE b = 2";
-    let result = normalize_sql(sql, &dialect);
+    let result = Canonicalizer::new(&dialect).normalize_sql(sql);
 
     assert!(result.is_err());
 }
@@ -473,18 +473,24 @@ fn test_error_set_operations() {
 fn test_fallback_expression_is_idempotent() {
     let dialect = PostgreSqlDialect {};
     let sql = "SELECT * FROM t WHERE CAST(a AS text) = 'hello'";
-    let normalized = normalize_sql(sql, &dialect).unwrap();
+    let normalized = Canonicalizer::new(&dialect).normalize_sql(sql).unwrap();
     let replay = format!("SELECT * FROM t WHERE {normalized}");
-    assert_eq!(normalize_sql(&replay, &dialect).unwrap(), normalized);
+    assert_eq!(
+        Canonicalizer::new(&dialect).normalize_sql(&replay).unwrap(),
+        normalized
+    );
 }
 
 #[test]
 fn test_boolean_truth_test_is_idempotent() {
     let dialect = PostgreSqlDialect {};
     let sql = "SELECT * FROM t WHERE enabled IS TRUE";
-    let normalized = normalize_sql(sql, &dialect).unwrap();
+    let normalized = Canonicalizer::new(&dialect).normalize_sql(sql).unwrap();
     let replay = format!("SELECT * FROM t WHERE {normalized}");
-    assert_eq!(normalize_sql(&replay, &dialect).unwrap(), normalized);
+    assert_eq!(
+        Canonicalizer::new(&dialect).normalize_sql(&replay).unwrap(),
+        normalized
+    );
 }
 
 #[test]
@@ -492,7 +498,7 @@ fn test_normalize_unknown_unary_op_fallback() {
     let dialect = PostgreSqlDialect {};
 
     let sql = "SELECT * FROM t WHERE ~a = 1";
-    let result = normalize_sql(sql, &dialect);
+    let result = Canonicalizer::new(&dialect).normalize_sql(sql);
 
     assert!(matches!(result, Err(CanonicalizeError::Unsupported(_))));
 }
@@ -505,9 +511,9 @@ fn test_and_tree_flattening() {
     let sql2 = "SELECT * FROM t WHERE (a = 1 AND b = 2) AND c = 3";
     let sql3 = "SELECT * FROM t WHERE a = 1 AND (b = 2 AND c = 3)";
 
-    let norm1 = normalize_sql(sql1, &dialect).unwrap();
-    let norm2 = normalize_sql(sql2, &dialect).unwrap();
-    let norm3 = normalize_sql(sql3, &dialect).unwrap();
+    let norm1 = Canonicalizer::new(&dialect).normalize_sql(sql1).unwrap();
+    let norm2 = Canonicalizer::new(&dialect).normalize_sql(sql2).unwrap();
+    let norm3 = Canonicalizer::new(&dialect).normalize_sql(sql3).unwrap();
 
     assert_eq!(norm1, norm2, "Flat AND should equal left-associated AND");
     assert_eq!(norm1, norm3, "Flat AND should equal right-associated AND");
@@ -521,9 +527,9 @@ fn test_or_tree_flattening() {
     let sql2 = "SELECT * FROM t WHERE (a = 1 OR b = 2) OR c = 3";
     let sql3 = "SELECT * FROM t WHERE a = 1 OR (b = 2 OR c = 3)";
 
-    let norm1 = normalize_sql(sql1, &dialect).unwrap();
-    let norm2 = normalize_sql(sql2, &dialect).unwrap();
-    let norm3 = normalize_sql(sql3, &dialect).unwrap();
+    let norm1 = Canonicalizer::new(&dialect).normalize_sql(sql1).unwrap();
+    let norm2 = Canonicalizer::new(&dialect).normalize_sql(sql2).unwrap();
+    let norm3 = Canonicalizer::new(&dialect).normalize_sql(sql3).unwrap();
 
     assert_eq!(norm1, norm2);
     assert_eq!(norm1, norm3);
@@ -536,8 +542,8 @@ fn test_distinct_operators_produce_different_strings() {
     let sql1 = "SELECT * FROM t WHERE a + b > 0";
     let sql2 = "SELECT * FROM t WHERE a - b > 0";
 
-    let norm1 = normalize_sql(sql1, &dialect).unwrap();
-    let norm2 = normalize_sql(sql2, &dialect).unwrap();
+    let norm1 = Canonicalizer::new(&dialect).normalize_sql(sql1).unwrap();
+    let norm2 = Canonicalizer::new(&dialect).normalize_sql(sql2).unwrap();
 
     assert_ne!(
         norm1, norm2,
@@ -546,7 +552,7 @@ fn test_distinct_operators_produce_different_strings() {
 }
 
 fn unsupported_message(sql: &str) -> String {
-    match normalize_sql(sql, &PostgreSqlDialect {}) {
+    match Canonicalizer::new(&PostgreSqlDialect {}).normalize_sql(sql) {
         Err(CanonicalizeError::Unsupported(message)) => message,
         other => panic!("expected an unsupported error for {sql}, got {other:?}"),
     }
@@ -556,7 +562,10 @@ fn unsupported_message(sql: &str) -> String {
 fn test_reject_sql_beyond_length_limit() {
     let padding = " ".repeat(8193);
     let sql = format!("SELECT * FROM t WHERE a = 1{padding}");
-    assert_eq!(unsupported_message(&sql), "SQL input is too long");
+    assert_eq!(
+        Canonicalizer::new(&PostgreSqlDialect {}).normalize_sql(&sql),
+        Err(CanonicalizeError::InputTooLong { limit: 8192 })
+    );
 }
 
 #[test]
@@ -585,23 +594,34 @@ fn test_reject_uncanonicalizable_binary_operator() {
 
 #[test]
 fn test_reject_literal_that_loses_a_quote_level() {
-    assert_eq!(
-        unsupported_message("SELECT * FROM t WHERE a = ''''''"),
-        "String literal cannot be printed without changing its value"
-    );
+    assert!(matches!(
+        Canonicalizer::new(&PostgreSqlDialect {}).normalize_sql("SELECT * FROM t WHERE a = ''''''"),
+        Err(CanonicalizeError::NotRoundTrippable(_))
+    ));
 }
 
+/// A delimited name escapes its own delimiter by doubling it, and the canonical spelling has
+/// to do the same or it names something else. subql keys rows on such a column.
 #[test]
-fn test_reject_identifier_that_loses_a_quote_level() {
-    assert_eq!(
-        unsupported_message("SELECT * FROM t WHERE \"a\"\"\"\"b\" = 1"),
-        "Quoted identifier cannot be printed without changing its value"
-    );
+fn test_quoted_identifier_carrying_its_delimiter_is_escaped() {
+    let canonicalizer = Canonicalizer::new(&PostgreSqlDialect {});
+    let canonical = canonicalizer
+        .normalize_sql("SELECT * FROM t WHERE \"a\"\"b\" = 7")
+        .unwrap();
+    assert_eq!(canonical, "(\"a\"\"b\" = 7)");
+
+    // Two doubled delimiters in the name survive the same way.
+    let deeper = canonicalizer
+        .normalize_sql("SELECT * FROM t WHERE \"a\"\"\"\"b\" = 1")
+        .unwrap();
+    assert_eq!(deeper, "(\"a\"\"\"\"b\" = 1)");
 }
 
 #[test]
 fn test_function_call_in_predicate_is_canonicalized() {
     let dialect = PostgreSqlDialect {};
-    let canonical = normalize_sql("SELECT * FROM t WHERE COALESCE(a, 1) > 0", &dialect).unwrap();
+    let canonical = Canonicalizer::new(&dialect)
+        .normalize_sql("SELECT * FROM t WHERE COALESCE(a, 1) > 0")
+        .unwrap();
     assert_eq!(canonical, "(COALESCE(a, 1) > 0)");
 }

@@ -13,7 +13,10 @@ keywords = ["sql", "canonicalization", "parser", "hash", "no-std"]
 categories = ["database", "parser-implementations", "no-std"]
 
 [features]
-default = []
+default = ["std"]
+# Lets the SQL parser grow its stack on demand, so deeply nested input is refused instead of
+# aborting the process. Turning this off keeps the crate `no_std` and gives up that guarantee.
+std = ["sqlparser/recursive-protection"]
 
 [dependencies]
 seahash = { version = "4.1", default-features = false }

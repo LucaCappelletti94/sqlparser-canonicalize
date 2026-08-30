@@ -4,10 +4,10 @@ use libfuzzer_sys::fuzz_target;
 use sqlparser::dialect::{
     AnsiDialect, Dialect, GenericDialect, MySqlDialect, PostgreSqlDialect, SQLiteDialect,
 };
-use sqlparser_canonicalize::{hash_canonical, normalize_sql};
+use sqlparser_canonicalize::{Canonicalizer, hash_canonical};
 
 fn exercise(sql: &str, dialect: &dyn Dialect) {
-    let Ok(canonical) = normalize_sql(sql, dialect) else {
+    let Ok(canonical) = Canonicalizer::new(dialect).normalize_sql(sql) else {
         return;
     };
     let hash = hash_canonical(&canonical);
@@ -17,7 +17,10 @@ fn exercise(sql: &str, dialect: &dyn Dialect) {
     } else {
         format!("SELECT * FROM t WHERE {canonical}")
     };
-    assert_eq!(normalize_sql(&replay, dialect).unwrap(), canonical);
+    assert_eq!(
+        Canonicalizer::new(dialect).normalize_sql(&replay).unwrap(),
+        canonical
+    );
 }
 
 fuzz_target!(|data: &[u8]| {
