@@ -1,0 +1,1 @@
+CASE WHEN a = 1 THEN b ELSE c END = 2

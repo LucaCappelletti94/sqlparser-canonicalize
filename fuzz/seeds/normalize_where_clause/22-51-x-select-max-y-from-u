@@ -1,0 +1,1 @@
+x = (SELECT max(y) FROM u)

@@ -1,13 +1,17 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use sqlparser::dialect::{Dialect, MySqlDialect, PostgreSqlDialect, SQLiteDialect};
-use sqlparser_canonicalize::normalize_sql;
+use sqlparser::dialect::{
+    AnsiDialect, Dialect, GenericDialect, MySqlDialect, PostgreSqlDialect, SQLiteDialect,
+};
+use sqlparser_canonicalize::{hash_canonical, normalize_sql};
 
 fn exercise(sql: &str, dialect: &dyn Dialect) {
     let Ok(canonical) = normalize_sql(sql, dialect) else {
         return;
     };
+    let hash = hash_canonical(&canonical);
+    assert_eq!(hash_canonical(&canonical), hash);
     let replay = if canonical == "TRUE" {
         "SELECT * FROM t".to_string()
     } else {
@@ -23,9 +27,16 @@ fuzz_target!(|data: &[u8]| {
     let Ok(sql) = core::str::from_utf8(bytes) else {
         return;
     };
-    match selector % 3 {
-        0 => exercise(sql, &PostgreSqlDialect {}),
-        1 => exercise(sql, &MySqlDialect {}),
-        _ => exercise(sql, &SQLiteDialect {}),
+    let dialect: &dyn Dialect = match selector % 5 {
+        0 => &PostgreSqlDialect {},
+        1 => &MySqlDialect {},
+        2 => &SQLiteDialect {},
+        3 => &GenericDialect {},
+        _ => &AnsiDialect {},
+    };
+    if (selector / 5) % 2 == 0 {
+        exercise(sql, dialect);
+    } else {
+        exercise(&format!("SELECT * FROM t WHERE {sql}"), dialect);
     }
 });

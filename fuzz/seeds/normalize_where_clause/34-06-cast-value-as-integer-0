@@ -1,0 +1,1 @@
+CAST(value AS INTEGER) > 0

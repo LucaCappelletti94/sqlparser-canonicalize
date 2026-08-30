@@ -1,0 +1,1 @@
+SELECT * FROM t WHERE x NOT IN (SELECT id FROM m WHERE owner = 'a')
