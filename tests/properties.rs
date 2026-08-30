@@ -1,5 +1,9 @@
 use proptest::prelude::*;
-use sqlparser::dialect::{MySqlDialect, PostgreSqlDialect, SQLiteDialect};
+use sqlparser::ast::{SetExpr, Statement};
+use sqlparser::dialect::{
+    AnsiDialect, Dialect, GenericDialect, MySqlDialect, PostgreSqlDialect, SQLiteDialect,
+};
+use sqlparser::parser::Parser;
 use sqlparser_canonicalize::Canonicalizer;
 
 fn normalize(sql: &str) -> String {
@@ -285,5 +289,89 @@ fn postgres_quotes_only_names_that_folding_would_change() {
             .normalize_sql("SELECT * FROM t WHERE Status = 1")
             .unwrap(),
         "(1 = status)"
+    );
+}
+
+/// The standard folds an unquoted name upward, so the quoted upper-case spelling is the one
+/// that needs no quotes, the mirror image of PostgreSQL.
+#[test]
+fn ansi_folds_unquoted_names_upward() {
+    let canonicalizer = Canonicalizer::new(&AnsiDialect {});
+    assert_eq!(
+        canonicalizer
+            .normalize_sql("SELECT * FROM t WHERE mycol = 1")
+            .unwrap(),
+        "(1 = MYCOL)"
+    );
+    assert_eq!(
+        canonicalizer
+            .normalize_sql("SELECT * FROM t WHERE \"MYCOL\" = 1")
+            .unwrap(),
+        "(1 = MYCOL)"
+    );
+    // Lower case survived quoting, so it is a different name and keeps its quotes.
+    assert_eq!(
+        canonicalizer
+            .normalize_sql("SELECT * FROM t WHERE \"mycol\" = 1")
+            .unwrap(),
+        "(\"mycol\" = 1)"
+    );
+}
+
+/// A dialect whose folding rule the crate does not know keeps every name exactly as written,
+/// which never merges two spellings and so never merges two columns.
+#[test]
+fn an_unknown_dialect_keeps_names_exactly() {
+    let canonicalizer = Canonicalizer::new(&GenericDialect {});
+    assert_eq!(
+        canonicalizer
+            .normalize_sql("SELECT * FROM t WHERE \"MyCol\" = 1")
+            .unwrap(),
+        "(\"MyCol\" = 1)"
+    );
+    assert_eq!(
+        canonicalizer
+            .normalize_sql("SELECT * FROM t WHERE MyCol = 1")
+            .unwrap(),
+        "(1 = MyCol)"
+    );
+}
+
+/// MySQL delimits with a backtick, and a name carrying one doubles it the same way.
+#[test]
+fn mysql_escapes_a_backtick_inside_a_name() {
+    assert_eq!(
+        Canonicalizer::new(&MySqlDialect {})
+            .normalize_sql("SELECT * FROM t WHERE `a``b` = 1")
+            .unwrap(),
+        "(1 = `a``b`)"
+    );
+}
+
+/// The clause entry point answers exactly as the statement one, since subql reaches the crate
+/// through it after resolving its own placeholders.
+#[test]
+fn the_clause_entry_point_agrees_with_the_statement_one() {
+    let dialect = PostgreSqlDialect {};
+    let sql = "SELECT * FROM t WHERE b = 2 AND a = 1";
+    let statement = Parser::parse_sql(&dialect, sql).unwrap().pop().unwrap();
+    let Statement::Query(query) = statement else {
+        panic!("the test SQL is a query");
+    };
+    let SetExpr::Select(select) = *query.body else {
+        panic!("the test SQL is a plain SELECT");
+    };
+
+    let canonicalizer = Canonicalizer::new(&dialect as &dyn Dialect);
+    assert_eq!(
+        canonicalizer
+            .normalize_where_clause(select.selection.as_ref())
+            .unwrap(),
+        canonicalizer.normalize_sql(sql).unwrap()
+    );
+    // No clause at all is the same sentinel a filterless statement produces.
+    assert_eq!(
+        canonicalizer.normalize_where_clause(None).unwrap(),
+        canonicalizer.normalize_sql("SELECT * FROM t").unwrap()
     );
 }
