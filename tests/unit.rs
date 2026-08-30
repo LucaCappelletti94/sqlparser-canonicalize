@@ -470,18 +470,21 @@ fn test_error_set_operations() {
 }
 
 #[test]
-fn test_normalize_unknown_expr_fallback() {
+fn test_fallback_expression_is_idempotent() {
     let dialect = PostgreSqlDialect {};
-
     let sql = "SELECT * FROM t WHERE CAST(a AS text) = 'hello'";
-    let result = normalize_sql(sql, &dialect);
+    let normalized = normalize_sql(sql, &dialect).unwrap();
+    let replay = format!("SELECT * FROM t WHERE {normalized}");
+    assert_eq!(normalize_sql(&replay, &dialect).unwrap(), normalized);
+}
 
-    assert!(result.is_ok());
-    let normalized = result.unwrap();
-    assert!(
-        !normalized.is_empty(),
-        "the debug fallback always produces at least the expression text"
-    );
+#[test]
+fn test_boolean_truth_test_is_idempotent() {
+    let dialect = PostgreSqlDialect {};
+    let sql = "SELECT * FROM t WHERE enabled IS TRUE";
+    let normalized = normalize_sql(sql, &dialect).unwrap();
+    let replay = format!("SELECT * FROM t WHERE {normalized}");
+    assert_eq!(normalize_sql(&replay, &dialect).unwrap(), normalized);
 }
 
 #[test]

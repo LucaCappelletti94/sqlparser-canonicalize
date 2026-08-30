@@ -146,3 +146,35 @@ fn unsafe_quoted_identifiers_are_idempotent() {
         assert_eq!(normalize_sql(&replay, &dialect).unwrap(), canonical);
     }
 }
+
+#[test]
+fn nested_negation_is_idempotent() {
+    let dialect = PostgreSqlDialect {};
+    for sql in [
+        "SELECT * FROM t WHERE (NOT a) = b",
+        "SELECT * FROM t WHERE (NOT a) IS NULL",
+        "SELECT * FROM t WHERE (NOT a) IN (b, c)",
+        "SELECT * FROM t WHERE (NOT a) BETWEEN b AND c",
+    ] {
+        let canonical = normalize_sql(sql, &dialect).unwrap();
+        let replay = format!("SELECT * FROM t WHERE {canonical}");
+        assert_eq!(
+            normalize_sql(&replay, &dialect).unwrap(),
+            canonical,
+            "{sql}"
+        );
+    }
+}
+
+#[test]
+fn predicates_whose_canonical_text_would_not_read_back_are_rejected() {
+    let dialect = PostgreSqlDialect {};
+    for sql in [
+        // The parser drops one level of quote doubling every time it prints this literal.
+        "SELECT * FROM t WHERE ''''''",
+        // The parser prints this field access without the space it needs to be read back.
+        "SELECT * FROM t WHERE CASE WHEN a = 1 THEN b ELSE c END . 2",
+    ] {
+        assert!(normalize_sql(sql, &dialect).is_err(), "{sql}");
+    }
+}

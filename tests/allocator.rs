@@ -48,5 +48,7 @@ fn fixed_corpus_allocation_count_does_not_grow() {
     let sql = "SELECT * FROM t WHERE (a = 1 AND b = 2) OR (c = 3 AND d = 4) AND e IN (5, 6, 7)";
     let _ = measure(sql);
     let counts = std::array::from_fn::<_, 16, _>(|_| measure(sql));
-    assert_eq!(counts, [194; 16]);
+    // Two passes over the predicate, because the canonical text is parsed back to prove it
+    // reads as itself before it is returned.
+    assert_eq!(counts, [421; 16]);
 }

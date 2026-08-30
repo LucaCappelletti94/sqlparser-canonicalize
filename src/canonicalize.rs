@@ -7,7 +7,7 @@ use core::hash::{Hash, Hasher};
 use seahash::SeaHasher;
 use sqlparser::ast::{
     BinaryOperator, Distinct, Expr, Ident, LimitClause, Query, Select, SelectModifiers, SetExpr,
-    Statement, TableFactor,
+    Statement, TableFactor, Value,
 };
 use sqlparser::dialect::Dialect;
 use sqlparser::keywords::ALL_KEYWORDS;
@@ -17,9 +17,33 @@ use crate::CanonicalizeError;
 
 const MAX_EXPR_DEPTH: usize = 128;
 const MAX_SQL_LEN: usize = 8192;
+/// Canonical text for a `SELECT` with no `WHERE` clause.
+const NO_FILTER: &str = "TRUE";
 
 /// Parses one `SELECT` and returns canonical text for its `WHERE` clause.
+///
+/// The canonical text is verified to survive a parse of itself, so a predicate whose
+/// canonical form would read back as something else is rejected instead of hashed.
 pub fn normalize_sql(sql: &str, dialect: &dyn Dialect) -> Result<String, CanonicalizeError> {
+    let canonical = normalize_sql_inner(sql, dialect)?;
+    verify_round_trip(&canonical, dialect)?;
+    Ok(canonical)
+}
+
+/// Canonicalizes a parsed `WHERE` clause in O(n log n) time for boolean chains and O(n) otherwise.
+///
+/// `dialect` is the dialect the expression was parsed with, used to verify that the canonical
+/// text reads back unchanged.
+pub fn normalize_where_clause(
+    where_expr: Option<&Expr>,
+    dialect: &dyn Dialect,
+) -> Result<String, CanonicalizeError> {
+    let canonical = normalize_where_clause_inner(where_expr)?;
+    verify_round_trip(&canonical, dialect)?;
+    Ok(canonical)
+}
+
+fn normalize_sql_inner(sql: &str, dialect: &dyn Dialect) -> Result<String, CanonicalizeError> {
     if sql.len() > MAX_SQL_LEN {
         return Err(CanonicalizeError::Unsupported(
             "SQL input is too long".to_string(),
@@ -41,15 +65,32 @@ pub fn normalize_sql(sql: &str, dialect: &dyn Dialect) -> Result<String, Canonic
         CanonicalizeError::Unsupported("Expected exactly one SELECT statement".to_string())
     })?;
     let where_expr = extract_where(&statement)?;
-    normalize_where_clause(where_expr)
+    normalize_where_clause_inner(where_expr)
 }
 
-/// Canonicalizes a parsed `WHERE` clause in O(n log n) time for boolean chains and O(n) otherwise.
-pub fn normalize_where_clause(where_expr: Option<&Expr>) -> Result<String, CanonicalizeError> {
+fn normalize_where_clause_inner(where_expr: Option<&Expr>) -> Result<String, CanonicalizeError> {
     where_expr.map_or_else(
-        || Ok("TRUE".to_string()),
-        |expr| normalize_expr_inner(expr, 0),
+        || Ok(NO_FILTER.to_string()),
+        |expr| normalize_expr_inner(expr, 0, false),
     )
+}
+
+/// Rejects canonical text that a second pass would not reproduce byte for byte.
+///
+/// Canonical text is a hash key, so text that reads back as a different predicate would
+/// give two distinct predicates one hash.
+fn verify_round_trip(canonical: &str, dialect: &dyn Dialect) -> Result<(), CanonicalizeError> {
+    let replay = if canonical == NO_FILTER {
+        "SELECT * FROM t".to_string()
+    } else {
+        format!("SELECT * FROM t WHERE {canonical}")
+    };
+    match normalize_sql_inner(&replay, dialect) {
+        Ok(again) if again == canonical => Ok(()),
+        _ => Err(CanonicalizeError::Unsupported(
+            "Canonical text does not survive a round trip".to_string(),
+        )),
+    }
 }
 
 /// Returns the stable 128-bit SeaHash value for canonical text.
@@ -268,7 +309,11 @@ const fn limit_clause_name(limit: Option<&LimitClause>) -> &'static str {
     }
 }
 
-fn normalize_expr_inner(expr: &Expr, depth: usize) -> Result<String, CanonicalizeError> {
+fn normalize_expr_inner(
+    expr: &Expr,
+    depth: usize,
+    tight_parent: bool,
+) -> Result<String, CanonicalizeError> {
     if depth > MAX_EXPR_DEPTH {
         return Err(CanonicalizeError::Unsupported(
             "Expression nesting is too deep".to_string(),
@@ -282,7 +327,7 @@ fn normalize_expr_inner(expr: &Expr, depth: usize) -> Result<String, Canonicaliz
                 children.extend(collect_flat_children(right, op));
                 let mut child_text: Vec<String> = children
                     .iter()
-                    .map(|child| normalize_expr_inner(child, depth + 1))
+                    .map(|child| normalize_expr_inner(child, depth + 1, false))
                     .collect::<Result<_, _>>()?;
                 child_text.sort();
                 let operator = operator_text(op)?;
@@ -291,8 +336,8 @@ fn normalize_expr_inner(expr: &Expr, depth: usize) -> Result<String, Canonicaliz
                     .reduce(|left, right| format!("({left} {operator} {right})"))
                     .unwrap_or_default()
             } else {
-                let left = normalize_expr_inner(left, depth + 1)?;
-                let right = normalize_expr_inner(right, depth + 1)?;
+                let left = normalize_expr_inner(left, depth + 1, true)?;
+                let right = normalize_expr_inner(right, depth + 1, true)?;
                 let (left, right) = if is_commutative(op) && left > right {
                     (right, left)
                 } else {
@@ -301,14 +346,23 @@ fn normalize_expr_inner(expr: &Expr, depth: usize) -> Result<String, Canonicaliz
                 format!("({left} {} {right})", operator_text(op)?)
             }
         }
-        Expr::UnaryOp { op, expr } => format!(
-            "{} {}",
-            unary_operator_text(op)?,
-            normalize_expr_inner(expr, depth + 1)?
-        ),
-        Expr::IsNull(expr) => format!("{} IS NULL", normalize_expr_inner(expr, depth + 1)?),
+        Expr::UnaryOp { op, expr } => {
+            let operator = unary_operator_text(op)?;
+            let operand = normalize_expr_inner(expr, depth + 1, true)?;
+            // NOT binds looser than any operator that can enclose it, so a nested NOT
+            // reparses against the wrong operand without parentheses.
+            if tight_parent && matches!(op, sqlparser::ast::UnaryOperator::Not) {
+                format!("({operator} {operand})")
+            } else {
+                format!("{operator} {operand}")
+            }
+        }
+        Expr::IsNull(expr) => format!("{} IS NULL", normalize_expr_inner(expr, depth + 1, true)?),
         Expr::IsNotNull(expr) => {
-            format!("{} IS NOT NULL", normalize_expr_inner(expr, depth + 1)?)
+            format!(
+                "{} IS NOT NULL",
+                normalize_expr_inner(expr, depth + 1, true)?
+            )
         }
         Expr::InList {
             expr,
@@ -317,13 +371,13 @@ fn normalize_expr_inner(expr: &Expr, depth: usize) -> Result<String, Canonicaliz
         } => {
             let mut items: Vec<String> = list
                 .iter()
-                .map(|item| normalize_expr_inner(item, depth + 1))
+                .map(|item| normalize_expr_inner(item, depth + 1, true))
                 .collect::<Result<_, _>>()?;
             items.sort();
             let not = if *negated { "NOT " } else { "" };
             format!(
                 "{} {not}IN ({})",
-                normalize_expr_inner(expr, depth + 1)?,
+                normalize_expr_inner(expr, depth + 1, true)?,
                 items.join(", ")
             )
         }
@@ -335,7 +389,7 @@ fn normalize_expr_inner(expr: &Expr, depth: usize) -> Result<String, Canonicaliz
             let not = if *negated { "NOT " } else { "" };
             format!(
                 "{} {not}IN ({subquery})",
-                normalize_expr_inner(expr, depth + 1)?
+                normalize_expr_inner(expr, depth + 1, true)?
             )
         }
         Expr::Between {
@@ -347,9 +401,9 @@ fn normalize_expr_inner(expr: &Expr, depth: usize) -> Result<String, Canonicaliz
             let not = if *negated { "NOT " } else { "" };
             format!(
                 "{} {not}BETWEEN {} AND {}",
-                normalize_expr_inner(expr, depth + 1)?,
-                normalize_expr_inner(low, depth + 1)?,
-                normalize_expr_inner(high, depth + 1)?
+                normalize_expr_inner(expr, depth + 1, true)?,
+                normalize_expr_inner(low, depth + 1, true)?,
+                normalize_expr_inner(high, depth + 1, true)?
             )
         }
         Expr::Like {
@@ -362,11 +416,11 @@ fn normalize_expr_inner(expr: &Expr, depth: usize) -> Result<String, Canonicaliz
             let not = if *negated { "NOT " } else { "" };
             let escape = escape_char
                 .as_ref()
-                .map_or_else(String::new, |value| format!(" ESCAPE '{value}'"));
+                .map_or_else(String::new, |value| format!(" ESCAPE {value}"));
             format!(
                 "{} {not}LIKE {}{escape}",
-                normalize_expr_inner(expr, depth + 1)?,
-                normalize_expr_inner(pattern, depth + 1)?
+                normalize_expr_inner(expr, depth + 1, true)?,
+                normalize_expr_inner(pattern, depth + 1, true)?
             )
         }
         Expr::ILike {
@@ -379,32 +433,77 @@ fn normalize_expr_inner(expr: &Expr, depth: usize) -> Result<String, Canonicaliz
             let not = if *negated { "NOT " } else { "" };
             let escape = escape_char
                 .as_ref()
-                .map_or_else(String::new, |value| format!(" ESCAPE '{value}'"));
+                .map_or_else(String::new, |value| format!(" ESCAPE {value}"));
             format!(
                 "{} {not}ILIKE {}{escape}",
-                normalize_expr_inner(expr, depth + 1)?,
-                normalize_expr_inner(pattern, depth + 1)?
+                normalize_expr_inner(expr, depth + 1, true)?,
+                normalize_expr_inner(pattern, depth + 1, true)?
             )
         }
-        Expr::Nested(inner) => normalize_expr_inner(inner, depth + 1)?,
-        Expr::Identifier(identifier) => identifier_text(identifier),
+        Expr::Nested(inner) => normalize_expr_inner(inner, depth + 1, tight_parent)?,
+        Expr::Identifier(identifier) => identifier_text(identifier)?,
         Expr::CompoundIdentifier(parts) => parts
             .iter()
             .map(identifier_text)
-            .collect::<Vec<_>>()
+            .collect::<Result<Vec<_>, _>>()?
             .join("."),
-        Expr::Value(value) => format!("{}", value.value),
+        Expr::Value(value) => {
+            reject_lossy_quoting(&value.value)?;
+            format!("{}", value.value)
+        }
         Expr::Function(function) => format!("{function}"),
-        _ => format!("{expr:?}"),
+        _ => format!("{expr}"),
     })
 }
 
-fn identifier_text(identifier: &Ident) -> String {
+fn identifier_text(identifier: &Ident) -> Result<String, CanonicalizeError> {
     if identifier.quote_style.is_some() && identifier_needs_quotes(&identifier.value) {
-        format!("{identifier}")
+        let quote = identifier.quote_style.unwrap_or('"');
+        if !quoting_survives_printing(&identifier.value, quote) {
+            return Err(CanonicalizeError::Unsupported(
+                "Quoted identifier cannot be printed without changing its value".to_string(),
+            ));
+        }
+        Ok(format!("{identifier}"))
     } else {
-        identifier.value.clone()
+        Ok(identifier.value.clone())
     }
+}
+
+/// Rejects a literal the parser cannot print without changing its value.
+fn reject_lossy_quoting(value: &Value) -> Result<(), CanonicalizeError> {
+    let intact = match value {
+        Value::SingleQuotedString(text) | Value::NationalStringLiteral(text) => {
+            quoting_survives_printing(text, '\'')
+        }
+        Value::DoubleQuotedString(text) => quoting_survives_printing(text, '"'),
+        _ => true,
+    };
+    if intact {
+        Ok(())
+    } else {
+        Err(CanonicalizeError::Unsupported(
+            "String literal cannot be printed without changing its value".to_string(),
+        ))
+    }
+}
+
+/// Reports whether printing `text` inside `quote` delimiters preserves it.
+///
+/// `sqlparser` leaves a quote alone when it already looks escaped, either doubled or preceded
+/// by a backslash, so such text reads back one escape level shorter than it went in.
+fn quoting_survives_printing(text: &str, quote: char) -> bool {
+    let mut characters = text.chars().peekable();
+    let mut previous = char::default();
+    while let Some(character) = characters.next() {
+        if character == quote
+            && (previous == '\\' || characters.peek().is_some_and(|next| *next == quote))
+        {
+            return false;
+        }
+        previous = character;
+    }
+    true
 }
 
 fn identifier_needs_quotes(value: &str) -> bool {
