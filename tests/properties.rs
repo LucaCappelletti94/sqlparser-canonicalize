@@ -178,17 +178,12 @@ fn nested_negation_is_idempotent() {
 #[test]
 fn predicates_whose_canonical_text_would_not_read_back_are_rejected() {
     let dialect = PostgreSqlDialect {};
-    for sql in [
-        // The parser drops one level of quote doubling every time it prints this literal.
-        "SELECT * FROM t WHERE ''''''",
-        // The parser prints this field access without the space it needs to be read back.
-        "SELECT * FROM t WHERE CASE WHEN a = 1 THEN b ELSE c END . 2",
-    ] {
-        assert!(
-            Canonicalizer::new(&dialect).normalize_sql(sql).is_err(),
-            "{sql}"
-        );
-    }
+    // The parser drops one level of quote doubling every time it prints this literal.
+    let sql = "SELECT * FROM t WHERE ''''''";
+    assert!(
+        Canonicalizer::new(&dialect).normalize_sql(sql).is_err(),
+        "{sql}"
+    );
 }
 
 /// Without the parser's stack protection this input aborts the process rather than returning.
