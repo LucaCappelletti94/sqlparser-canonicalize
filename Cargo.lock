@@ -714,8 +714,9 @@ checksum = "0c790de23124f9ab44544d7ac05d60440adc586479ce501c1d6d7da3cd8c9cf5"
 
 [[package]]
 name = "sqlparser"
-version = "0.62.0"
-source = "git+https://github.com/apache/datafusion-sqlparser-rs?branch=main#5c974dd1399d9d16cc2924bef1846dbfba91cd49"
+version = "0.63.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3679862809bd1f92e563cf6fd820e28f39135303668001c10331d5027183e8b4"
 dependencies = [
  "log",
  "recursive",
