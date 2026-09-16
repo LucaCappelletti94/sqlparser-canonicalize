@@ -4,7 +4,6 @@
 [![Coverage](https://codecov.io/gh/LucaCappelletti94/sqlparser-canonicalize/branch/main/graph/badge.svg)](https://codecov.io/gh/LucaCappelletti94/sqlparser-canonicalize)
 [![Crates.io](https://img.shields.io/crates/v/sqlparser-canonicalize.svg)](https://crates.io/crates/sqlparser-canonicalize)
 [![Docs](https://docs.rs/sqlparser-canonicalize/badge.svg)](https://docs.rs/sqlparser-canonicalize)
-[![Codacy](https://app.codacy.com/project/badge/Grade/216650c7af90407fa7814266bab73938)](https://app.codacy.com/gh/LucaCappelletti94/sqlparser-canonicalize/dashboard)
 [![License](https://img.shields.io/crates/l/sqlparser-canonicalize.svg)](https://github.com/LucaCappelletti94/sqlparser-canonicalize/blob/main/LICENSE)
 
 `sqlparser-canonicalize` produces canonical predicate text and stable hashes from `sqlparser` syntax trees. Equivalent predicate spellings produce identical bytes for durable deduplication.
