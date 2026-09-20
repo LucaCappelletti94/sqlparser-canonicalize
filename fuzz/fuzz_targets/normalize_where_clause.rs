@@ -46,16 +46,27 @@ fuzz_target!(|data: &[u8]| {
     else {
         return;
     };
+    // Accepted canonical text re-reads as one complete expression that re-normalises to itself.
+    let expr = Parser::new(verify_dialect)
+        .try_with_sql(&canonical)
+        .and_then(|mut parser| parser.parse_expr())
+        .expect("accepted canonical text must parse as one expression");
+    assert_eq!(
+        Canonicalizer::new(verify_dialect)
+            .normalize_where_clause(Some(&expr))
+            .expect("accepted canonical text must re-normalise as itself"),
+        canonical,
+    );
+    // The statement entry has envelope limits the clause entry lacks, so assert where it accepts.
     let replay = if canonical == "TRUE" {
         "SELECT * FROM t".to_string()
     } else {
         format!("SELECT * FROM t WHERE {canonical}")
     };
-    assert_eq!(
-        Canonicalizer::new(verify_dialect)
-            .normalize_sql(&replay)
-            .unwrap(),
-        canonical,
-        "accepted canonical text must read back as itself"
-    );
+    if let Ok(again) = Canonicalizer::new(verify_dialect).normalize_sql(&replay) {
+        assert_eq!(
+            again, canonical,
+            "accepted canonical text must read back as itself"
+        );
+    }
 });
