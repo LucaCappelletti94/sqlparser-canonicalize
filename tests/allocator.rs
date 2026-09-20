@@ -47,8 +47,7 @@ fn fixed_corpus_allocation_count_does_not_grow() {
     let sql = "SELECT * FROM t WHERE (a = 1 AND b = 2) OR (c = 3 AND d = 4) AND e IN (5, 6, 7)";
     let _ = measure(sql);
     let counts = std::array::from_fn::<_, 16, _>(|_| measure(sql));
-    // Two passes over the predicate, because the canonical text is parsed back to prove it
-    // reads as itself before it is returned, plus one stack reservation per parse from the
-    // parser's recursion guard.
-    assert_eq!(counts, [423; 16]);
+    // Two passes over the predicate, the original statement parse and the expression
+    // re-read that proves the canonical text reads as itself.
+    assert_eq!(counts, [400; 16]);
 }

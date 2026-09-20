@@ -26,5 +26,8 @@ test = false
 doc = false
 bench = false
 
+# One sqlparser must link, so target and canonicalizer share the Expr and Dialect types.
+[patch.crates-io]
+sqlparser = { git = "https://github.com/apache/datafusion-sqlparser-rs", branch = "main" }
 [workspace]
 members = ["."]

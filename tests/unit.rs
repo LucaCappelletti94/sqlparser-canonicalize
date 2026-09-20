@@ -1,4 +1,6 @@
-use sqlparser::dialect::PostgreSqlDialect;
+use sqlparser::ast::{SetExpr, Statement};
+use sqlparser::dialect::{MySqlDialect, PostgreSqlDialect};
+use sqlparser::parser::Parser;
 use sqlparser_canonicalize::{CanonicalizeError, Canonicalizer, hash_canonical};
 
 #[test]
@@ -596,6 +598,62 @@ fn test_reject_uncanonicalizable_binary_operator() {
 fn test_reject_literal_that_loses_a_quote_level() {
     assert!(matches!(
         Canonicalizer::new(&PostgreSqlDialect {}).normalize_sql("SELECT * FROM t WHERE a = ''''''"),
+        Err(CanonicalizeError::NotRoundTrippable(_))
+    ));
+}
+
+/// MySQL reads a backslash as escaping the closing quote, so a `LIKE` pattern whose value
+/// ends in one has no canonical spelling MySQL accepts. The payload is the rendered text, so
+/// the refusal is provably the confirmation read, and PostgreSQL accepting the same bytes
+/// shows it is the dialect's verdict. subql relies on this to drop such subscriptions.
+#[test]
+fn test_reject_mysql_pattern_ending_with_the_escape() {
+    let dialect = MySqlDialect {};
+    let sql = "SELECT * FROM t WHERE name LIKE 'a\\\\'";
+    let canonicalizer = Canonicalizer::new(&dialect);
+    let statement_verdict = canonicalizer.normalize_sql(sql);
+    assert!(matches!(
+        &statement_verdict,
+        Err(CanonicalizeError::NotRoundTrippable(text)) if text == "name LIKE 'a\\'"
+    ));
+
+    let mut statements = Parser::parse_sql(&dialect, sql).unwrap();
+    let Statement::Query(query) = statements.pop().unwrap() else {
+        panic!("the test SQL is a query");
+    };
+    let SetExpr::Select(select) = *query.body else {
+        panic!("the test SQL is a plain SELECT");
+    };
+    let clause_verdict = canonicalizer.normalize_where_clause(select.selection.as_ref());
+    assert!(matches!(
+        &clause_verdict,
+        Err(CanonicalizeError::NotRoundTrippable(text)) if text == "name LIKE 'a\\'"
+    ));
+
+    let postgres = Canonicalizer::new(&PostgreSqlDialect {});
+    assert_eq!(
+        postgres
+            .normalize_sql("SELECT * FROM t WHERE name LIKE 'a\\'")
+            .unwrap(),
+        "name LIKE 'a\\'",
+    );
+}
+
+/// What caps an `AND` chain's canonical nesting is the parser's depth budget for the
+/// re-read rather than any length rule, so text inside the budget must be accepted.
+#[test]
+fn test_deep_and_chain_is_accepted_up_to_the_read_back_budget() {
+    let dialect = PostgreSqlDialect {};
+    let canonicalizer = Canonicalizer::new(&dialect);
+    let chain = |terms: usize| {
+        let parts: Vec<String> = (1..=terms)
+            .map(|term| format!("c{term} = {term}"))
+            .collect();
+        format!("SELECT * FROM t WHERE {}", parts.join(" AND "))
+    };
+    assert!(canonicalizer.normalize_sql(&chain(46)).is_ok());
+    assert!(matches!(
+        canonicalizer.normalize_sql(&chain(47)),
         Err(CanonicalizeError::NotRoundTrippable(_))
     ));
 }

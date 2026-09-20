@@ -12,6 +12,7 @@ use sqlparser::ast::{
 use sqlparser::dialect::{AnsiDialect, Dialect, MySqlDialect, PostgreSqlDialect, SQLiteDialect};
 use sqlparser::keywords::ALL_KEYWORDS;
 use sqlparser::parser::Parser;
+use sqlparser::tokenizer::Token;
 
 use crate::CanonicalizeError;
 
@@ -23,8 +24,8 @@ const NO_FILTER: &str = "TRUE";
 impl<'a> Canonicalizer<'a> {
     /// Parses one `SELECT` and returns canonical text for its `WHERE` clause.
     ///
-    /// The canonical text is verified to survive a parse of itself, so a predicate whose
-    /// canonical form would read back as something else is rejected instead of hashed.
+    /// The canonical text is verified to survive being read back as itself, so a predicate
+    /// whose canonical form would read as something else is rejected instead of hashed.
     pub fn normalize_sql(&self, sql: &str) -> Result<String, CanonicalizeError> {
         let canonical = normalize_sql_inner(sql, self)?;
         confirm_reads_back_as_itself(canonical, self)
@@ -74,23 +75,35 @@ fn normalize_where_clause_inner(
     )
 }
 
-/// Returns the canonical text only if a second pass reproduces it byte for byte.
+/// Returns the canonical text only if reading it back as an expression reproduces it byte
+/// for byte.
 ///
 /// Canonical text is a hash key, so text that reads back as a different predicate would
-/// give two distinct predicates one hash.
+/// give two distinct predicates one hash. An expression re-read checks the whole rendering
+/// because a statement around it adds only scaffolding no caller sent.
 fn confirm_reads_back_as_itself(
     canonical: String,
     context: &Canonicalizer<'_>,
 ) -> Result<String, CanonicalizeError> {
-    let replay = if canonical == NO_FILTER {
-        "SELECT * FROM t".to_string()
-    } else {
-        format!("SELECT * FROM t WHERE {canonical}")
-    };
-    match normalize_sql_inner(&replay, context) {
-        Ok(again) if again == canonical => Ok(canonical),
-        _ => Err(CanonicalizeError::NotRoundTrippable(canonical)),
+    if canonical == NO_FILTER {
+        return Ok(canonical);
     }
+    if read_back(&canonical, context).is_some_and(|again| again == canonical) {
+        Ok(canonical)
+    } else {
+        Err(CanonicalizeError::NotRoundTrippable(canonical))
+    }
+}
+
+/// Reads `canonical` back as one complete expression and returns its normalised text.
+fn read_back(canonical: &str, context: &Canonicalizer<'_>) -> Option<String> {
+    let mut parser = Parser::new(context.dialect).try_with_sql(canonical).ok()?;
+    let expr = parser.parse_expr().ok()?;
+    // parse_expr takes a leading expression and stops, so require nothing to trail it.
+    if !matches!(parser.peek_token_ref().token, Token::EOF) {
+        return None;
+    }
+    normalize_expr_inner(&expr, 0, false, context).ok()
 }
 
 /// Returns the stable 128-bit SeaHash value for canonical text.
