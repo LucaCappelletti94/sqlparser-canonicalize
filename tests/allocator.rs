@@ -1,12 +1,15 @@
+use core::cell::Cell;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::hint::black_box;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use sqlparser::dialect::PostgreSqlDialect;
 use sqlparser_canonicalize::Canonicalizer;
 
-static ENABLED: AtomicBool = AtomicBool::new(false);
-static ALLOCATIONS: AtomicUsize = AtomicUsize::new(0);
+// Thread-local, because the test harness keeps allocating on its own thread while the test runs.
+thread_local! {
+    static ENABLED: Cell<bool> = const { Cell::new(false) };
+    static ALLOCATIONS: Cell<usize> = const { Cell::new(0) };
+}
 
 struct CountingAllocator;
 
@@ -15,8 +18,8 @@ unsafe impl GlobalAlloc for CountingAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         // SAFETY: `GlobalAlloc` callers provide a valid layout.
         let pointer = unsafe { System.alloc(layout) };
-        if ENABLED.load(Ordering::Relaxed) && !pointer.is_null() {
-            ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
+        if !pointer.is_null() && ENABLED.get() {
+            ALLOCATIONS.set(ALLOCATIONS.get() + 1);
         }
         pointer
     }
@@ -31,15 +34,15 @@ unsafe impl GlobalAlloc for CountingAllocator {
 static GLOBAL: CountingAllocator = CountingAllocator;
 
 fn measure(sql: &str) -> usize {
-    ALLOCATIONS.store(0, Ordering::Relaxed);
-    ENABLED.store(true, Ordering::Relaxed);
+    ALLOCATIONS.set(0);
+    ENABLED.set(true);
     let normalized = black_box(
         Canonicalizer::new(black_box(&PostgreSqlDialect {})).normalize_sql(black_box(sql)),
     )
     .unwrap();
-    ENABLED.store(false, Ordering::Relaxed);
+    ENABLED.set(false);
     black_box(normalized);
-    ALLOCATIONS.load(Ordering::Relaxed)
+    ALLOCATIONS.get()
 }
 
 #[test]
