@@ -1,5 +1,5 @@
 use sqlparser::ast::{SetExpr, Statement};
-use sqlparser::dialect::{MySqlDialect, PostgreSqlDialect};
+use sqlparser::dialect::{Dialect, MySqlDialect, PostgreSqlDialect};
 use sqlparser::parser::Parser;
 use sqlparser_canonicalize::{CanonicalizeError, Canonicalizer, hash_canonical};
 
@@ -682,4 +682,55 @@ fn test_function_call_in_predicate_is_canonicalized() {
         .normalize_sql("SELECT * FROM t WHERE COALESCE(a, 1) > 0")
         .unwrap();
     assert_eq!(canonical, "(COALESCE(a, 1) > 0)");
+}
+
+fn assert_canonical(dialect: &dyn Dialect, cases: &[(&str, &str)]) {
+    let canonicalizer = Canonicalizer::new(dialect);
+    for (predicate, expected) in cases {
+        let sql = format!("SELECT * FROM t WHERE {predicate}");
+        assert_eq!(
+            canonicalizer.normalize_sql(&sql).as_deref(),
+            Ok(*expected),
+            "{dialect:?} {predicate}"
+        );
+    }
+}
+
+#[test]
+fn predicate_operands_keep_their_parentheses() {
+    let cases = [
+        ("flag = (value IS NULL)", "((value IS NULL) = flag)"),
+        ("(a IS NULL) = b", "((a IS NULL) = b)"),
+        ("flag = (v IS NOT NULL)", "((v IS NOT NULL) = flag)"),
+        ("flag = (v IN (1, 2))", "((v IN (1, 2)) = flag)"),
+        (
+            "flag < (v IN (SELECT id FROM u))",
+            "(flag < (v IN (SELECT id FROM u)))",
+        ),
+        (
+            "flag = (v NOT BETWEEN 1 AND 2)",
+            "((v NOT BETWEEN 1 AND 2) = flag)",
+        ),
+        ("flag = (v LIKE 'x')", "((v LIKE 'x') = flag)"),
+        ("(a IS NULL) IS NULL", "(a IS NULL) IS NULL"),
+        ("v BETWEEN (a IS NULL) AND b", "v BETWEEN (a IS NULL) AND b"),
+        ("NOT (a IS NULL)", "NOT (a IS NULL)"),
+    ];
+    assert_canonical(&PostgreSqlDialect {}, &cases);
+    assert_canonical(&MySqlDialect {}, &cases);
+    assert_canonical(
+        &PostgreSqlDialect {},
+        &[("flag = (v ILIKE 'x')", "((v ILIKE 'x') = flag)")],
+    );
+}
+
+#[test]
+fn predicates_that_are_not_operands_stay_unparenthesized() {
+    assert_canonical(
+        &PostgreSqlDialect {},
+        &[
+            ("(a IS NULL)", "a IS NULL"),
+            ("(v LIKE 'x') AND (w IN (1))", "(v LIKE 'x' AND w IN (1))"),
+        ],
+    );
 }

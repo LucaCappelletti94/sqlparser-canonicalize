@@ -7,7 +7,7 @@ use core::hash::{Hash, Hasher};
 use seahash::SeaHasher;
 use sqlparser::ast::{
     BinaryOperator, Distinct, Expr, Ident, LimitClause, Query, Select, SelectModifiers, SetExpr,
-    Statement, TableFactor, Value,
+    Statement, TableFactor, UnaryOperator, Value,
 };
 use sqlparser::dialect::{AnsiDialect, Dialect, MySqlDialect, PostgreSqlDialect, SQLiteDialect};
 use sqlparser::keywords::ALL_KEYWORDS;
@@ -334,7 +334,7 @@ fn normalize_expr_inner(
         });
     }
 
-    Ok(match expr {
+    let text = match expr {
         Expr::BinaryOp { left, op, right } => {
             if matches!(op, BinaryOperator::And | BinaryOperator::Or) {
                 let mut children = collect_flat_children(left, op);
@@ -360,17 +360,11 @@ fn normalize_expr_inner(
                 format!("({left} {} {right})", operator_text(op)?)
             }
         }
-        Expr::UnaryOp { op, expr } => {
-            let operator = unary_operator_text(op)?;
-            let operand = normalize_expr_inner(expr, depth + 1, true, context)?;
-            // NOT binds looser than any operator that can enclose it, so a nested NOT
-            // reparses against the wrong operand without parentheses.
-            if tight_parent && matches!(op, sqlparser::ast::UnaryOperator::Not) {
-                format!("({operator} {operand})")
-            } else {
-                format!("{operator} {operand}")
-            }
-        }
+        Expr::UnaryOp { op, expr } => format!(
+            "{} {}",
+            unary_operator_text(op)?,
+            normalize_expr_inner(expr, depth + 1, true, context)?
+        ),
         Expr::IsNull(expr) => format!(
             "{} IS NULL",
             normalize_expr_inner(expr, depth + 1, true, context)?
@@ -470,7 +464,33 @@ fn normalize_expr_inner(
         }
         Expr::Function(function) => format!("{function}"),
         _ => format!("{expr}"),
+    };
+    Ok(if tight_parent && prints_unenclosed(expr) {
+        format!("({text})")
+    } else {
+        text
     })
+}
+
+/// Reports whether `expr` is a predicate printed without delimiters of its own.
+///
+/// How tightly these bind to their neighbours differs by dialect, and `NOT` binds looser than
+/// any operator that can enclose it, so as an operand they are enclosed in parentheses or the
+/// canonical text could read back grouped another way.
+const fn prints_unenclosed(expr: &Expr) -> bool {
+    matches!(
+        expr,
+        Expr::UnaryOp {
+            op: UnaryOperator::Not,
+            ..
+        } | Expr::IsNull(_)
+            | Expr::IsNotNull(_)
+            | Expr::InList { .. }
+            | Expr::InSubquery { .. }
+            | Expr::Between { .. }
+            | Expr::Like { .. }
+            | Expr::ILike { .. }
+    )
 }
 
 /// How a dialect decides whether two spellings of a name are the same column.
@@ -671,13 +691,11 @@ fn operator_text(operator: &BinaryOperator) -> Result<&'static str, Canonicalize
     }
 }
 
-fn unary_operator_text(
-    operator: &sqlparser::ast::UnaryOperator,
-) -> Result<&'static str, CanonicalizeError> {
+fn unary_operator_text(operator: &UnaryOperator) -> Result<&'static str, CanonicalizeError> {
     match operator {
-        sqlparser::ast::UnaryOperator::Not => Ok("NOT"),
-        sqlparser::ast::UnaryOperator::Plus => Ok("+"),
-        sqlparser::ast::UnaryOperator::Minus => Ok("-"),
+        UnaryOperator::Not => Ok("NOT"),
+        UnaryOperator::Plus => Ok("+"),
+        UnaryOperator::Minus => Ok("-"),
         other => Err(CanonicalizeError::Unsupported(format!(
             "Unsupported unary operator: {other}"
         ))),
