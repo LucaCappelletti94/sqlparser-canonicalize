@@ -10,3 +10,5 @@ cargo +nightly fuzz run normalize_sql -- -max_len=10000 -timeout=1 -dict=fuzz/sq
 ```
 
 For a campaign, add `-fork=8 -ignore_crashes=1` so one finding does not stop the run, then replay each artifact individually. `-max_len` must exceed 8192 for the input length guard to be reachable.
+
+ClusterFuzzLite fuzzes both targets in CI, with the same dictionary and `max_len`. A pull request gets ten minutes on the code it changes, and `main` gets an hour daily, keeping its corpus on the `fuzz-corpus` branch.
