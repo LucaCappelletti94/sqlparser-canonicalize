@@ -350,15 +350,15 @@ fn normalize_expr_inner(
                     .reduce(|left, right| format!("({left} {operator} {right})"))
                     .unwrap_or_default()
             } else {
-                let left = normalize_expr_inner(left, depth + 1, true, context)?;
-                let right = normalize_expr_inner(right, depth + 1, true, context)?;
-                let (left, right) = if is_commutative(op) && left > right {
-                    (right, left)
-                } else {
-                    (left, right)
-                };
-                format!("({left} {} {right})", operator_text(op)?)
+                let operator = operator_text(op)?;
+                infix_text(left, operator, right, is_commutative(op), depth, context)?
             }
+        }
+        Expr::IsDistinctFrom(left, right) => {
+            infix_text(left, "IS DISTINCT FROM", right, true, depth, context)?
+        }
+        Expr::IsNotDistinctFrom(left, right) => {
+            infix_text(left, "IS NOT DISTINCT FROM", right, true, depth, context)?
         }
         Expr::UnaryOp { op, expr } => format!(
             "{} {}",
@@ -470,6 +470,26 @@ fn normalize_expr_inner(
     } else {
         text
     })
+}
+
+/// Spells `left operator right` in parentheses, so it reads back whole wherever it is nested,
+/// with the operands in sorted order when the operator is symmetric.
+fn infix_text(
+    left: &Expr,
+    operator: &str,
+    right: &Expr,
+    symmetric: bool,
+    depth: usize,
+    context: &Canonicalizer<'_>,
+) -> Result<String, CanonicalizeError> {
+    let left = normalize_expr_inner(left, depth + 1, true, context)?;
+    let right = normalize_expr_inner(right, depth + 1, true, context)?;
+    let (left, right) = if symmetric && left > right {
+        (right, left)
+    } else {
+        (left, right)
+    };
+    Ok(format!("({left} {operator} {right})"))
 }
 
 /// Reports whether `expr` is a predicate printed without delimiters of its own.
@@ -666,7 +686,11 @@ fn collect_flat_children<'a>(expr: &'a Expr, operator: &BinaryOperator) -> Vec<&
 const fn is_commutative(operator: &BinaryOperator) -> bool {
     matches!(
         operator,
-        BinaryOperator::And | BinaryOperator::Or | BinaryOperator::Eq
+        BinaryOperator::And
+            | BinaryOperator::Or
+            | BinaryOperator::Eq
+            | BinaryOperator::NotEq
+            | BinaryOperator::Spaceship
     )
 }
 
@@ -675,6 +699,7 @@ fn operator_text(operator: &BinaryOperator) -> Result<&'static str, Canonicalize
         BinaryOperator::And => Ok("AND"),
         BinaryOperator::Or => Ok("OR"),
         BinaryOperator::Eq => Ok("="),
+        BinaryOperator::Spaceship => Ok("<=>"),
         BinaryOperator::NotEq => Ok("!="),
         BinaryOperator::Lt => Ok("<"),
         BinaryOperator::LtEq => Ok("<="),

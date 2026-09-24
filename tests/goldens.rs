@@ -58,8 +58,20 @@ const GOLDENS: &[Golden] = &[
     Golden {
         dialect: DialectKind::PostgreSql,
         sql: "SELECT * FROM t WHERE age != 42",
-        normalized: "(age != 42)",
-        hash: 12683479535703509878171549340018863210,
+        normalized: "(42 != age)",
+        hash: 102968402348262718566844936109611287537,
+    },
+    Golden {
+        dialect: DialectKind::PostgreSql,
+        sql: "SELECT * FROM t WHERE deleted_at IS NOT DISTINCT FROM NULL",
+        normalized: "(NULL IS NOT DISTINCT FROM deleted_at)",
+        hash: 99315443687852918114510564172484027840,
+    },
+    Golden {
+        dialect: DialectKind::PostgreSql,
+        sql: "SELECT * FROM t WHERE status IS DISTINCT FROM 'active'",
+        normalized: "('active' IS DISTINCT FROM status)",
+        hash: 176171465578505115639774219110214302167,
     },
     Golden {
         dialect: DialectKind::PostgreSql,
@@ -316,8 +328,14 @@ const GOLDENS: &[Golden] = &[
     Golden {
         dialect: DialectKind::MySql,
         sql: "SELECT * FROM t WHERE age != 42",
-        normalized: "(age != 42)",
-        hash: 12683479535703509878171549340018863210,
+        normalized: "(42 != age)",
+        hash: 102968402348262718566844936109611287537,
+    },
+    Golden {
+        dialect: DialectKind::MySql,
+        sql: "SELECT * FROM t WHERE deleted_at <=> NULL",
+        normalized: "(NULL <=> deleted_at)",
+        hash: 334564663628246787903199153241645203912,
     },
     Golden {
         dialect: DialectKind::MySql,
@@ -574,8 +592,20 @@ const GOLDENS: &[Golden] = &[
     Golden {
         dialect: DialectKind::SQLite,
         sql: "SELECT * FROM t WHERE age != 42",
-        normalized: "(age != 42)",
-        hash: 12683479535703509878171549340018863210,
+        normalized: "(42 != age)",
+        hash: 102968402348262718566844936109611287537,
+    },
+    Golden {
+        dialect: DialectKind::SQLite,
+        sql: "SELECT * FROM t WHERE deleted_at IS NOT DISTINCT FROM NULL",
+        normalized: "(NULL IS NOT DISTINCT FROM deleted_at)",
+        hash: 99315443687852918114510564172484027840,
+    },
+    Golden {
+        dialect: DialectKind::SQLite,
+        sql: "SELECT * FROM t WHERE status IS DISTINCT FROM 'active'",
+        normalized: "('active' IS DISTINCT FROM status)",
+        hash: 176171465578505115639774219110214302167,
     },
     Golden {
         dialect: DialectKind::SQLite,
