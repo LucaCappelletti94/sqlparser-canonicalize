@@ -734,3 +734,100 @@ fn predicates_that_are_not_operands_stay_unparenthesized() {
         ],
     );
 }
+
+fn canonical_texts(dialect: &dyn Dialect, predicates: &[&str]) -> Vec<String> {
+    let canonicalizer = Canonicalizer::new(dialect);
+    predicates
+        .iter()
+        .map(|predicate| {
+            canonicalizer
+                .normalize_sql(&format!("SELECT * FROM t WHERE {predicate}"))
+                .unwrap()
+        })
+        .collect()
+}
+
+#[test]
+fn null_safe_equality_orders_its_operands() {
+    let texts = canonical_texts(&MySqlDialect {}, &["n <=> m", "M <=> N", "m <=> (n)"]);
+    assert_eq!(texts, ["(m <=> n)"; 3]);
+}
+
+#[test]
+fn is_not_distinct_from_normalizes_and_orders_its_operands() {
+    let texts = canonical_texts(
+        &PostgreSqlDialect {},
+        &[
+            "n IS NOT DISTINCT FROM m",
+            "M IS NOT DISTINCT FROM N",
+            "m IS NOT DISTINCT FROM (n)",
+        ],
+    );
+    assert_eq!(texts, ["(m IS NOT DISTINCT FROM n)"; 3]);
+}
+
+#[test]
+fn is_distinct_from_normalizes_and_orders_its_operands() {
+    let texts = canonical_texts(
+        &PostgreSqlDialect {},
+        &["n IS DISTINCT FROM m", "M IS DISTINCT FROM (N)"],
+    );
+    assert_eq!(texts, ["(m IS DISTINCT FROM n)"; 2]);
+}
+
+#[test]
+fn inequality_orders_its_operands() {
+    let texts = canonical_texts(&PostgreSqlDialect {}, &["a != b", "b <> a"]);
+    assert_eq!(texts, ["(a != b)"; 2]);
+}
+
+#[test]
+fn nested_distinctness_tests_read_back_as_themselves() {
+    let texts = canonical_texts(
+        &PostgreSqlDialect {},
+        &[
+            "(a IS DISTINCT FROM b) = c",
+            "c IS NOT DISTINCT FROM (b IS DISTINCT FROM a)",
+        ],
+    );
+    assert_eq!(
+        texts,
+        [
+            "((a IS DISTINCT FROM b) = c)",
+            "((a IS DISTINCT FROM b) IS NOT DISTINCT FROM c)",
+        ]
+    );
+}
+
+#[test]
+fn null_safe_comparisons_keep_predicate_operands_enclosed() {
+    assert_canonical(
+        &PostgreSqlDialect {},
+        &[
+            (
+                "flag IS DISTINCT FROM (value IS NULL)",
+                "((value IS NULL) IS DISTINCT FROM flag)",
+            ),
+            (
+                "(value IS NULL) IS NOT DISTINCT FROM flag",
+                "((value IS NULL) IS NOT DISTINCT FROM flag)",
+            ),
+            (
+                "z IS DISTINCT FROM (v LIKE 'x')",
+                "((v LIKE 'x') IS DISTINCT FROM z)",
+            ),
+            (
+                "a IS NOT DISTINCT FROM (v IN (1, 2))",
+                "((v IN (1, 2)) IS NOT DISTINCT FROM a)",
+            ),
+        ],
+    );
+    assert_canonical(
+        &MySqlDialect {},
+        &[
+            ("flag <=> (value IS NULL)", "((value IS NULL) <=> flag)"),
+            ("(b IS NULL) != a", "((b IS NULL) != a)"),
+            ("z != (b IS NULL)", "((b IS NULL) != z)"),
+        ],
+    );
+}
