@@ -28,26 +28,26 @@ const GOLDENS: &[Golden] = &[
     Golden {
         dialect: DialectKind::PostgreSql,
         sql: "SELECT * FROM t WHERE age > 18",
-        normalized: "(age > 18)",
-        hash: 292377788459137190795462354130980277275,
+        normalized: "(18 < age)",
+        hash: 316111075571651616950055409650343842010,
     },
     Golden {
         dialect: DialectKind::PostgreSql,
         sql: "SELECT * FROM t WHERE age >= 18",
-        normalized: "(age >= 18)",
-        hash: 96959591457307944904555814042553578216,
+        normalized: "(18 <= age)",
+        hash: 278432499478339973164059801902769922318,
     },
     Golden {
         dialect: DialectKind::PostgreSql,
         sql: "SELECT * FROM t WHERE age < 65",
-        normalized: "(age < 65)",
-        hash: 249764920661847514626832755980428109760,
+        normalized: "(65 > age)",
+        hash: 83492278720086946753790729493557862069,
     },
     Golden {
         dialect: DialectKind::PostgreSql,
         sql: "SELECT * FROM t WHERE age <= 65",
-        normalized: "(age <= 65)",
-        hash: 142133684043952530757668767522792284451,
+        normalized: "(65 >= age)",
+        hash: 244161918419377154061829666031752459250,
     },
     Golden {
         dialect: DialectKind::PostgreSql,
@@ -136,8 +136,8 @@ const GOLDENS: &[Golden] = &[
     Golden {
         dialect: DialectKind::PostgreSql,
         sql: "SELECT * FROM t WHERE ((age > 18))",
-        normalized: "(age > 18)",
-        hash: 292377788459137190795462354130980277275,
+        normalized: "(18 < age)",
+        hash: 316111075571651616950055409650343842010,
     },
     Golden {
         dialect: DialectKind::PostgreSql,
@@ -148,8 +148,8 @@ const GOLDENS: &[Golden] = &[
     Golden {
         dialect: DialectKind::PostgreSql,
         sql: "SELECT * FROM t WHERE b < a",
-        normalized: "(b < a)",
-        hash: 164195086123485964968356541696287096375,
+        normalized: "(a > b)",
+        hash: 204201253671108966590160388409485334977,
     },
     Golden {
         dialect: DialectKind::PostgreSql,
@@ -232,8 +232,8 @@ const GOLDENS: &[Golden] = &[
     Golden {
         dialect: DialectKind::PostgreSql,
         sql: "SELECT * FROM t WHERE status = 'open' AND amount > 100",
-        normalized: "(('open' = status) AND (amount > 100))",
-        hash: 236186193320798656853084463803930322699,
+        normalized: "(('open' = status) AND (100 < amount))",
+        hash: 188608718948517086269448025140156137829,
     },
     Golden {
         dialect: DialectKind::PostgreSql,
@@ -256,8 +256,8 @@ const GOLDENS: &[Golden] = &[
     Golden {
         dialect: DialectKind::PostgreSql,
         sql: "SELECT SUM(amount) FROM t WHERE amount > 10",
-        normalized: "(amount > 10)",
-        hash: 268413062225073979841068607631610090110,
+        normalized: "(10 < amount)",
+        hash: 244853546457191983353911351810811010689,
     },
     Golden {
         dialect: DialectKind::PostgreSql,
@@ -298,26 +298,26 @@ const GOLDENS: &[Golden] = &[
     Golden {
         dialect: DialectKind::MySql,
         sql: "SELECT * FROM t WHERE age > 18",
-        normalized: "(age > 18)",
-        hash: 292377788459137190795462354130980277275,
+        normalized: "(18 < age)",
+        hash: 316111075571651616950055409650343842010,
     },
     Golden {
         dialect: DialectKind::MySql,
         sql: "SELECT * FROM t WHERE age >= 18",
-        normalized: "(age >= 18)",
-        hash: 96959591457307944904555814042553578216,
+        normalized: "(18 <= age)",
+        hash: 278432499478339973164059801902769922318,
     },
     Golden {
         dialect: DialectKind::MySql,
         sql: "SELECT * FROM t WHERE age < 65",
-        normalized: "(age < 65)",
-        hash: 249764920661847514626832755980428109760,
+        normalized: "(65 > age)",
+        hash: 83492278720086946753790729493557862069,
     },
     Golden {
         dialect: DialectKind::MySql,
         sql: "SELECT * FROM t WHERE age <= 65",
-        normalized: "(age <= 65)",
-        hash: 142133684043952530757668767522792284451,
+        normalized: "(65 >= age)",
+        hash: 244161918419377154061829666031752459250,
     },
     Golden {
         dialect: DialectKind::MySql,
@@ -400,8 +400,8 @@ const GOLDENS: &[Golden] = &[
     Golden {
         dialect: DialectKind::MySql,
         sql: "SELECT * FROM t WHERE ((age > 18))",
-        normalized: "(age > 18)",
-        hash: 292377788459137190795462354130980277275,
+        normalized: "(18 < age)",
+        hash: 316111075571651616950055409650343842010,
     },
     Golden {
         dialect: DialectKind::MySql,
@@ -412,8 +412,8 @@ const GOLDENS: &[Golden] = &[
     Golden {
         dialect: DialectKind::MySql,
         sql: "SELECT * FROM t WHERE b < a",
-        normalized: "(b < a)",
-        hash: 164195086123485964968356541696287096375,
+        normalized: "(a > b)",
+        hash: 204201253671108966590160388409485334977,
     },
     Golden {
         dialect: DialectKind::MySql,
@@ -496,8 +496,8 @@ const GOLDENS: &[Golden] = &[
     Golden {
         dialect: DialectKind::MySql,
         sql: "SELECT * FROM t WHERE status = 'open' AND amount > 100",
-        normalized: "(('open' = status) AND (amount > 100))",
-        hash: 236186193320798656853084463803930322699,
+        normalized: "(('open' = status) AND (100 < amount))",
+        hash: 188608718948517086269448025140156137829,
     },
     Golden {
         dialect: DialectKind::MySql,
@@ -520,8 +520,8 @@ const GOLDENS: &[Golden] = &[
     Golden {
         dialect: DialectKind::MySql,
         sql: "SELECT SUM(amount) FROM t WHERE amount > 10",
-        normalized: "(amount > 10)",
-        hash: 268413062225073979841068607631610090110,
+        normalized: "(10 < amount)",
+        hash: 244853546457191983353911351810811010689,
     },
     Golden {
         dialect: DialectKind::MySql,
@@ -562,26 +562,26 @@ const GOLDENS: &[Golden] = &[
     Golden {
         dialect: DialectKind::SQLite,
         sql: "SELECT * FROM t WHERE age > 18",
-        normalized: "(age > 18)",
-        hash: 292377788459137190795462354130980277275,
+        normalized: "(18 < age)",
+        hash: 316111075571651616950055409650343842010,
     },
     Golden {
         dialect: DialectKind::SQLite,
         sql: "SELECT * FROM t WHERE age >= 18",
-        normalized: "(age >= 18)",
-        hash: 96959591457307944904555814042553578216,
+        normalized: "(18 <= age)",
+        hash: 278432499478339973164059801902769922318,
     },
     Golden {
         dialect: DialectKind::SQLite,
         sql: "SELECT * FROM t WHERE age < 65",
-        normalized: "(age < 65)",
-        hash: 249764920661847514626832755980428109760,
+        normalized: "(65 > age)",
+        hash: 83492278720086946753790729493557862069,
     },
     Golden {
         dialect: DialectKind::SQLite,
         sql: "SELECT * FROM t WHERE age <= 65",
-        normalized: "(age <= 65)",
-        hash: 142133684043952530757668767522792284451,
+        normalized: "(65 >= age)",
+        hash: 244161918419377154061829666031752459250,
     },
     Golden {
         dialect: DialectKind::SQLite,
@@ -670,8 +670,8 @@ const GOLDENS: &[Golden] = &[
     Golden {
         dialect: DialectKind::SQLite,
         sql: "SELECT * FROM t WHERE ((age > 18))",
-        normalized: "(age > 18)",
-        hash: 292377788459137190795462354130980277275,
+        normalized: "(18 < age)",
+        hash: 316111075571651616950055409650343842010,
     },
     Golden {
         dialect: DialectKind::SQLite,
@@ -766,8 +766,8 @@ const GOLDENS: &[Golden] = &[
     Golden {
         dialect: DialectKind::SQLite,
         sql: "SELECT * FROM t WHERE status = 'open' AND amount > 100",
-        normalized: "(('open' = status) AND (amount > 100))",
-        hash: 236186193320798656853084463803930322699,
+        normalized: "(('open' = status) AND (100 < amount))",
+        hash: 188608718948517086269448025140156137829,
     },
     Golden {
         dialect: DialectKind::SQLite,
@@ -790,8 +790,8 @@ const GOLDENS: &[Golden] = &[
     Golden {
         dialect: DialectKind::SQLite,
         sql: "SELECT SUM(amount) FROM t WHERE amount > 10",
-        normalized: "(amount > 10)",
-        hash: 268413062225073979841068607631610090110,
+        normalized: "(10 < amount)",
+        hash: 244853546457191983353911351810811010689,
     },
     Golden {
         dialect: DialectKind::SQLite,
@@ -868,8 +868,8 @@ const GOLDENS: &[Golden] = &[
     Golden {
         dialect: DialectKind::PostgreSql,
         sql: "SELECT * FROM t WHERE Amount::NUMERIC > 10",
-        normalized: "(CAST(amount AS NUMERIC) > 10)",
-        hash: 89646719716099434755481402106727810743,
+        normalized: "(10 < CAST(amount AS NUMERIC))",
+        hash: 171201879322019007818016109927481221327,
     },
     Golden {
         dialect: DialectKind::PostgreSql,
@@ -904,8 +904,8 @@ const GOLDENS: &[Golden] = &[
     Golden {
         dialect: DialectKind::MySql,
         sql: "SELECT * FROM t WHERE Total > (SELECT AVG(Total) FROM Orders)",
-        normalized: "(total > (SELECT avg(total) FROM Orders))",
-        hash: 96598733493784093888332517147938748021,
+        normalized: "((SELECT avg(total) FROM Orders) < total)",
+        hash: 63845607836025529440545921617897993232,
     },
     Golden {
         dialect: DialectKind::SQLite,

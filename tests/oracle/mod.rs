@@ -1,11 +1,11 @@
 //! What a predicate means, written independently of the canonicalizer.
 //!
 //! Two expressions with the same meaning text are the same predicate under every equivalence
-//! the canonicalizer promises: redundant parentheses, the dialect's name folding, the order of
-//! operands and items it treats as unordered, and synonyms such as `SOME` for `ANY`, `x::T` for
-//! `CAST(x AS T)`, a missing `ELSE` for `ELSE NULL`, and a subquery without `WHERE` for one
-//! filtered by `TRUE` where `TRUE` is reserved.
-//! Anything else keeps its structure.
+//! the canonicalizer promises. Those are redundant parentheses, the dialect's name folding, the
+//! order of operands and items it treats as unordered, `a > b` for `b < a`, and synonyms such
+//! as `SOME` for `ANY`, `x::T` for `CAST(x AS T)`, a missing `ELSE` for `ELSE NULL`, and a
+//! subquery without `WHERE` for one filtered by `TRUE` where `TRUE` is reserved. Anything else
+//! keeps its structure.
 
 use sqlparser::ast::{
     AccessExpr, BinaryOperator, CastKind, CeilFloorKind, Expr, FunctionArg, FunctionArgExpr,
@@ -29,6 +29,8 @@ pub struct Folding {
     pub column: Fold,
     pub qualifier: Fold,
     pub true_is_reserved: bool,
+    pub plus_is_numeric: bool,
+    pub collation_is_symmetric: bool,
 }
 
 impl Folding {
@@ -48,10 +50,15 @@ impl Folding {
         let true_is_reserved = dialect.is::<PostgreSqlDialect>()
             || dialect.is::<MySqlDialect>()
             || dialect.is::<AnsiDialect>();
+        // SQL Server also concatenates strings with `+`, where the order matters.
+        let plus_is_numeric = true_is_reserved || dialect.is::<SQLiteDialect>();
         Self {
             column,
             qualifier,
             true_is_reserved,
+            plus_is_numeric,
+            // SQLite compares two columns under the left one's collation.
+            collation_is_symmetric: true_is_reserved,
         }
     }
 }
@@ -119,6 +126,27 @@ pub fn meaning(expr: &Expr, folding: Folding) -> String {
                 op,
                 BinaryOperator::Eq | BinaryOperator::NotEq | BinaryOperator::Spaceship
             ) =>
+        {
+            let (left, right) = unordered(left, right, folding);
+            format!("({op} {left} {right})")
+        }
+        // `a > b` and `b < a` are one comparison wherever the operands' collation does not depend
+        // on their order.
+        Expr::BinaryOp {
+            left,
+            op: op @ (BinaryOperator::Gt | BinaryOperator::GtEq),
+            right,
+        } if mirrorable(left, right, folding) => {
+            let mirrored = if matches!(op, BinaryOperator::Gt) {
+                "<"
+            } else {
+                "<="
+            };
+            format!("({mirrored} {} {})", m(right), m(left))
+        }
+        Expr::BinaryOp { left, op, right }
+            if folding.plus_is_numeric
+                && matches!(op, BinaryOperator::Plus | BinaryOperator::Multiply) =>
         {
             let (left, right) = unordered(left, right, folding);
             format!("({op} {left} {right})")
@@ -550,4 +578,12 @@ fn strip_nested(expr: &Expr) -> &Expr {
 
 fn is_true(expr: &Expr) -> bool {
     matches!(strip_nested(expr), Expr::Value(value) if matches!(value.value, Value::Boolean(true)))
+}
+
+fn mirrorable(left: &Expr, right: &Expr, folding: Folding) -> bool {
+    let literal = |expr: &Expr| matches!(strip_nested(expr), Expr::Value(_));
+    folding.collation_is_symmetric
+        || literal(left)
+        || literal(right)
+        || meaning(left, folding) == meaning(right, folding)
 }
