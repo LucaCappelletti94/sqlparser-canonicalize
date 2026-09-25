@@ -2,10 +2,14 @@
 //!
 //! Two expressions with the same meaning text are the same predicate under every equivalence
 //! the canonicalizer promises: redundant parentheses, the dialect's name folding, the order of
-//! operands and items it treats as unordered, and keyword synonyms such as `SOME` for `ANY`.
+//! operands and items it treats as unordered, and synonyms such as `SOME` for `ANY`, `x::T` for
+//! `CAST(x AS T)` and a missing `ELSE` for `ELSE NULL`.
 //! Anything else keeps its structure.
 
-use sqlparser::ast::{BinaryOperator, Expr, Ident, ObjectName};
+use sqlparser::ast::{
+    AccessExpr, BinaryOperator, CastKind, CeilFloorKind, Expr, FunctionArg, FunctionArgExpr,
+    FunctionArguments, Ident, ObjectName, Subscript, Value,
+};
 use sqlparser::dialect::{AnsiDialect, Dialect, MySqlDialect, PostgreSqlDialect, SQLiteDialect};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -230,6 +234,172 @@ pub fn meaning(expr: &Expr, folding: Folding) -> String {
                 columns.join(" ")
             )
         }
+        Expr::Function(function) => {
+            let name = object_name(&function.name, folding);
+            let plain = function.filter.is_none()
+                && function.over.is_none()
+                && function.within_group.is_empty()
+                && function.null_treatment.is_none()
+                && matches!(function.parameters, FunctionArguments::None);
+            match &function.args {
+                FunctionArguments::None if plain => format!("(call {name})"),
+                FunctionArguments::List(list)
+                    if plain && list.duplicate_treatment.is_none() && list.clauses.is_empty() =>
+                {
+                    let args: Vec<String> = list
+                        .args
+                        .iter()
+                        .map(|arg| match arg {
+                            FunctionArg::Unnamed(FunctionArgExpr::Expr(arg)) => m(arg),
+                            other => other.to_string(),
+                        })
+                        .collect();
+                    format!("(call {name} [{}])", args.join(" "))
+                }
+                _ => function.to_string(),
+            }
+        }
+        // `x::T` and `CAST(x AS T)` are one cast.
+        Expr::Cast {
+            kind,
+            expr,
+            data_type,
+            format,
+        } => {
+            let kind = match kind {
+                CastKind::DoubleColon => &CastKind::Cast,
+                kind => kind,
+            };
+            let format = format.as_ref().map(ToString::to_string);
+            format!("(cast {kind:?} {} {data_type} {format:?})", m(expr))
+        }
+        Expr::Convert {
+            is_try,
+            expr,
+            data_type,
+            charset,
+            target_before_value,
+            styles,
+        } => {
+            let data_type = data_type.as_ref().map(ToString::to_string);
+            let charset = charset.as_ref().map(ToString::to_string);
+            let styles: Vec<String> = styles.iter().map(m).collect();
+            format!(
+                "(convert {is_try} {} {data_type:?} {charset:?} {target_before_value} [{}])",
+                m(expr),
+                styles.join(" ")
+            )
+        }
+        Expr::Extract {
+            field,
+            syntax,
+            expr,
+        } => format!("(extract {field} {syntax:?} {})", m(expr)),
+        Expr::Ceil { expr, field } => format!("(ceil {} {})", m(expr), rounding(field)),
+        Expr::Floor { expr, field } => format!("(floor {} {})", m(expr), rounding(field)),
+        Expr::Position { expr, r#in } => format!("(position {} {})", m(expr), m(r#in)),
+        Expr::Substring {
+            expr,
+            substring_from,
+            substring_for,
+            special,
+            shorthand,
+        } => format!(
+            "(substring {special} {shorthand} {} {:?} {:?})",
+            m(expr),
+            substring_from.as_deref().map(m),
+            substring_for.as_deref().map(m)
+        ),
+        Expr::Trim {
+            expr,
+            trim_where,
+            trim_what,
+            trim_characters,
+        } => {
+            let characters = trim_characters
+                .as_ref()
+                .map(|characters| characters.iter().map(m).collect::<Vec<_>>());
+            format!(
+                "(trim {trim_where:?} {} {:?} {characters:?})",
+                m(expr),
+                trim_what.as_deref().map(m)
+            )
+        }
+        Expr::Overlay {
+            expr,
+            overlay_what,
+            overlay_from,
+            overlay_for,
+        } => format!(
+            "(overlay {} {} {} {:?})",
+            m(expr),
+            m(overlay_what),
+            m(overlay_from),
+            overlay_for.as_deref().map(m)
+        ),
+        // A missing `ELSE` and `ELSE NULL` are one result.
+        Expr::Case {
+            operand,
+            conditions,
+            else_result,
+            ..
+        } => {
+            let branches: Vec<String> = conditions
+                .iter()
+                .map(|when| format!("{} {}", m(&when.condition), m(&when.result)))
+                .collect();
+            let otherwise = else_result
+                .as_deref()
+                .filter(|result| !is_null(result))
+                .map(m);
+            format!(
+                "(case {:?} [{}] {otherwise:?})",
+                operand.as_deref().map(m),
+                branches.join(" ")
+            )
+        }
+        Expr::Tuple(items) => {
+            let items: Vec<String> = items.iter().map(m).collect();
+            format!("(tuple [{}])", items.join(" "))
+        }
+        Expr::Array(array) => {
+            let items: Vec<String> = array.elem.iter().map(m).collect();
+            format!("(array {} [{}])", array.named, items.join(" "))
+        }
+        Expr::Interval(interval) => format!(
+            "(interval {} {:?} {:?} {:?} {:?})",
+            m(&interval.value),
+            interval.leading_field.as_ref().map(ToString::to_string),
+            interval.leading_precision,
+            interval.last_field.as_ref().map(ToString::to_string),
+            interval.fractional_seconds_precision
+        ),
+        Expr::Prefixed { prefix, value } => format!("(prefixed {prefix} {})", m(value)),
+        // A parenthesized name is a value, while a bare name before a dot may be a table.
+        Expr::CompoundFieldAccess { root, access_chain } => {
+            let root = match root.as_ref() {
+                Expr::Nested(inner) if is_name(inner) => format!("(value {})", m(inner)),
+                root => access_name(root, folding),
+            };
+            let chain: Vec<String> = access_chain
+                .iter()
+                .map(|access| match access {
+                    AccessExpr::Dot(field) => format!(".{}", access_name(field, folding)),
+                    AccessExpr::Subscript(Subscript::Index { index }) => format!("[{}]", m(index)),
+                    AccessExpr::Subscript(Subscript::Slice {
+                        lower_bound,
+                        upper_bound,
+                        stride,
+                    }) => format!(
+                        "[{:?}:{:?}:{:?}]",
+                        lower_bound.as_ref().map(m),
+                        upper_bound.as_ref().map(m),
+                        stride.as_ref().map(m)
+                    ),
+                })
+                .collect();
+            format!("(access {root} {})", chain.concat())
+        }
         other => format!("{other}"),
     }
 }
@@ -250,4 +420,34 @@ fn object_name(name: &ObjectName, folding: Folding) -> String {
         })
         .collect::<Vec<_>>()
         .join(".")
+}
+
+fn access_name(expr: &Expr, folding: Folding) -> String {
+    match expr {
+        Expr::Identifier(ident) => name(ident, folding.qualifier),
+        expr => meaning(expr, folding),
+    }
+}
+
+fn rounding(field: &CeilFloorKind) -> String {
+    match field {
+        CeilFloorKind::DateTimeField(field) => field.to_string(),
+        CeilFloorKind::Scale(scale) => scale.to_string(),
+    }
+}
+
+fn is_null(expr: &Expr) -> bool {
+    match expr {
+        Expr::Nested(inner) => is_null(inner),
+        Expr::Value(value) => matches!(value.value, Value::Null),
+        _ => false,
+    }
+}
+
+fn is_name(expr: &Expr) -> bool {
+    match expr {
+        Expr::Nested(inner) => is_name(inner),
+        Expr::Identifier(_) | Expr::CompoundIdentifier(_) => true,
+        _ => false,
+    }
 }

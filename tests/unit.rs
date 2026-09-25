@@ -1,5 +1,7 @@
 use sqlparser::ast::{SetExpr, Statement};
-use sqlparser::dialect::{Dialect, MySqlDialect, PostgreSqlDialect, SQLiteDialect};
+use sqlparser::dialect::{
+    AnsiDialect, Dialect, GenericDialect, MySqlDialect, PostgreSqlDialect, SQLiteDialect,
+};
 use sqlparser::parser::Parser;
 use sqlparser_canonicalize::{CanonicalizeError, Canonicalizer, hash_canonical};
 
@@ -675,15 +677,6 @@ fn test_quoted_identifier_carrying_its_delimiter_is_escaped() {
     assert_eq!(deeper, "(\"a\"\"\"\"b\" = 1)");
 }
 
-#[test]
-fn test_function_call_in_predicate_is_canonicalized() {
-    let dialect = PostgreSqlDialect {};
-    let canonical = Canonicalizer::new(&dialect)
-        .normalize_sql("SELECT * FROM t WHERE COALESCE(a, 1) > 0")
-        .unwrap();
-    assert_eq!(canonical, "(COALESCE(a, 1) > 0)");
-}
-
 fn assert_canonical(dialect: &dyn Dialect, cases: &[(&str, &str)]) {
     let canonicalizer = Canonicalizer::new(dialect);
     for (predicate, expected) in cases {
@@ -1033,4 +1026,204 @@ fn json_path_access_is_refused() {
             "{predicate}"
         );
     }
+}
+
+fn assert_unsupported(dialect: &dyn Dialect, predicates: &[&str]) {
+    let canonicalizer = Canonicalizer::new(dialect);
+    for predicate in predicates {
+        let sql = format!("SELECT * FROM t WHERE {predicate}");
+        assert!(
+            matches!(
+                canonicalizer.normalize_sql(&sql),
+                Err(CanonicalizeError::Unsupported(_))
+            ),
+            "{dialect:?} {predicate}"
+        );
+    }
+}
+
+#[test]
+fn function_calls_fold_their_name_and_normalize_their_arguments() {
+    assert_canonical(
+        &PostgreSqlDialect {},
+        &[
+            ("COALESCE(A, 1) > 0", "(coalesce(a, 1) > 0)"),
+            ("coalesce((a), 1) > 0", "(coalesce(a, 1) > 0)"),
+            ("LOWER(Name) = 'x'", "('x' = lower(name))"),
+            ("\"Lower\"(name) = 'x'", "(\"Lower\"(name) = 'x')"),
+            (
+                "Pg_Catalog.Lower(name) = 'x'",
+                "('x' = pg_catalog.lower(name))",
+            ),
+            ("NOW() > d", "(now() > d)"),
+            ("d < CURRENT_TIMESTAMP", "(d < current_timestamp)"),
+            ("f(A = 1, (b))", "f((1 = a), b)"),
+        ],
+    );
+    assert_canonical(
+        &MySqlDialect {},
+        &[("IFNULL(A, 1) = 2", "(2 = ifnull(a, 1))")],
+    );
+}
+
+#[test]
+fn aggregate_and_window_calls_are_refused() {
+    assert_unsupported(
+        &PostgreSqlDialect {},
+        &[
+            "count(*) > 1",
+            "max(DISTINCT x) > 1",
+            "sum(x) FILTER (WHERE y) > 1",
+            "rank() OVER () = 1",
+            "string_agg(x, ',' ORDER BY x) = 'a'",
+            "f(name => x) = 1",
+        ],
+    );
+}
+
+#[test]
+fn casts_share_one_spelling() {
+    assert_canonical(
+        &PostgreSqlDialect {},
+        &[
+            ("CAST(A AS INT) = 1", "(1 = CAST(a AS INT))"),
+            ("A::INT = 1", "(1 = CAST(a AS INT))"),
+            ("(a)::INT = 1", "(1 = CAST(a AS INT))"),
+            ("cast((a + 1) as int) = 1", "(1 = CAST((a + 1) AS INT))"),
+        ],
+    );
+    assert_canonical(
+        &GenericDialect {},
+        &[("TRY_CAST(A AS INT) = 1", "(1 = TRY_CAST(A AS INT))")],
+    );
+}
+
+#[test]
+fn conditional_expressions_normalize_every_branch() {
+    assert_canonical(
+        &PostgreSqlDialect {},
+        &[
+            (
+                "CASE WHEN A THEN 1 ELSE NULL END = 1",
+                "(1 = CASE WHEN a THEN 1 END)",
+            ),
+            (
+                "CASE WHEN (a) THEN 1 END = 1",
+                "(1 = CASE WHEN a THEN 1 END)",
+            ),
+            (
+                "CASE A WHEN 1 THEN 'x' ELSE (B) END = 'x'",
+                "('x' = CASE a WHEN 1 THEN 'x' ELSE b END)",
+            ),
+            (
+                "CASE WHEN a = 1 THEN B WHEN C IS NULL THEN 2 END = 3",
+                "(3 = CASE WHEN (1 = a) THEN b WHEN c IS NULL THEN 2 END)",
+            ),
+        ],
+    );
+}
+
+#[test]
+fn special_syntax_functions_normalize_their_operands() {
+    assert_canonical(
+        &PostgreSqlDialect {},
+        &[
+            (
+                "EXTRACT(YEAR FROM D) = 2020",
+                "(2020 = EXTRACT(YEAR FROM d))",
+            ),
+            ("POSITION('a' IN (S)) = 1", "(1 = POSITION('a' IN s))"),
+            (
+                "SUBSTRING(S FROM 1 FOR 2) = 'ab'",
+                "('ab' = SUBSTRING(s FROM 1 FOR 2))",
+            ),
+            ("TRIM(BOTH 'x' FROM S) = ''", "('' = TRIM(BOTH 'x' FROM s))"),
+            ("CEIL(X) = FLOOR(Y)", "(CEIL(x) = FLOOR(y))"),
+            (
+                "OVERLAY(S PLACING 'a' FROM 1) = 'b'",
+                "('b' = OVERLAY(s PLACING 'a' FROM 1))",
+            ),
+        ],
+    );
+    assert_canonical(
+        &MySqlDialect {},
+        &[
+            ("CONVERT(A, CHAR) = 'x'", "('x' = CONVERT(a, CHAR))"),
+            (
+                "CONVERT(A USING utf8mb4) = 'x'",
+                "('x' = CONVERT(a USING utf8mb4))",
+            ),
+            ("SUBSTR(S, 1, 2) = 'ab'", "('ab' = SUBSTR(s, 1, 2))"),
+        ],
+    );
+}
+
+#[test]
+fn tuples_arrays_and_typed_literals_normalize_their_elements() {
+    assert_canonical(
+        &PostgreSqlDialect {},
+        &[
+            ("(A, (b)) = (1, 2)", "((1, 2) = (a, b))"),
+            ("ARRAY[A, 1] = x", "(ARRAY[a, 1] = x)"),
+            ("D > DATE '2020-01-01'", "(d > DATE '2020-01-01')"),
+            (
+                "D < NOW() - INTERVAL '1' DAY",
+                "(d < (now() - (INTERVAL '1' DAY)))",
+            ),
+        ],
+    );
+}
+
+#[test]
+fn field_access_keeps_the_parentheses_that_decide_its_meaning() {
+    assert_canonical(
+        &PostgreSqlDialect {},
+        &[
+            ("(C).Field = 1", "((c).field = 1)"),
+            ("((c)).field = 1", "((c).field = 1)"),
+            ("C.Field[1] = 1", "(1 = c.field[1])"),
+            ("A[(1)] = 1", "(1 = a[1])"),
+        ],
+    );
+    // MySQL matches table names by case, so a name that may be a qualifier keeps its spelling.
+    assert_canonical(&MySqlDialect {}, &[("T.a[1] = 1", "(1 = T.a[1])")]);
+}
+
+#[test]
+fn a_call_keeps_its_arguments_apart_from_special_syntax() {
+    assert_canonical(
+        &AnsiDialect {},
+        &[(
+            "POSITION(TRUE >= a IN ((2), 2)) = 1",
+            "(1 = POSITION(((true >= A) IN (2, 2))))",
+        )],
+    );
+    assert_canonical(
+        &PostgreSqlDialect {},
+        &[("POSITION('a' IN s) = 1", "(1 = POSITION('a' IN s))")],
+    );
+}
+
+#[test]
+fn a_name_spelled_like_an_operator_is_quoted_or_refused() {
+    // Inside `POSITION`, sqlparser reads `NOT` as a column name, and it would read back as the
+    // operator anywhere else.
+    assert_canonical(
+        &PostgreSqlDialect {},
+        &[
+            (
+                "POSITION(NOT - (b) IN a) = 1",
+                "(1 = POSITION((\"not\" - b) IN a))",
+            ),
+            ("Status = 'paid'", "('paid' = status)"),
+        ],
+    );
+    assert_canonical(
+        &AnsiDialect {},
+        &[(
+            "POSITION(NOT - (b) IN a) = 1",
+            "(1 = POSITION((\"NOT\" - B) IN A))",
+        )],
+    );
+    assert_unsupported(&GenericDialect {}, &["POSITION(NOT - (b) IN a) = 1"]);
 }
