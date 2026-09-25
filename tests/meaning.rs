@@ -52,7 +52,11 @@ enum Tree {
     AtTimeZone(Box<Tree>, Box<Tree>),
     Coalesce(Box<Tree>, Box<Tree>),
     Cast(Box<Tree>),
-    Case(Box<Tree>, Box<Tree>, Box<Tree>),
+    Case(Box<Tree>, Box<Tree>, Option<Box<Tree>>),
+    Extract(Box<Tree>),
+    Substring(Box<Tree>, Box<Tree>, Box<Tree>),
+    Position(Box<Tree>, Box<Tree>),
+    Tuple(Box<Tree>, Box<Tree>),
 }
 
 const BINARY: &[&str] = &[
@@ -106,9 +110,8 @@ const ATOMS: &[(&str, bool)] = &[
     ("TRUE", false),
 ];
 
-/// Builds a random predicate tree. `normalized_only` keeps to forms the canonicalizer
-/// normalizes itself, leaving out every form it prints verbatim.
-fn tree(rng: &mut Rng, depth: u32, quoted: &'static str, normalized_only: bool) -> Tree {
+/// Builds a random predicate tree.
+fn tree(rng: &mut Rng, depth: u32, quoted: &'static str) -> Tree {
     if depth == 0 || rng.percent(25) {
         if rng.percent(8) {
             return Tree::Atom(quoted, false);
@@ -116,15 +119,15 @@ fn tree(rng: &mut Rng, depth: u32, quoted: &'static str, normalized_only: bool) 
         let (text, identifier) = ATOMS[rng.below(ATOMS.len())];
         return Tree::Atom(text, identifier);
     }
-    let child = |rng: &mut Rng| Box::new(tree(rng, depth - 1, quoted, normalized_only));
-    match rng.below(if normalized_only { 13 } else { 16 }) {
+    let child = |rng: &mut Rng| Box::new(tree(rng, depth - 1, quoted));
+    match rng.below(20) {
         0..=4 => Tree::Binary(BINARY[rng.below(BINARY.len())], child(rng), child(rng)),
         5 => Tree::Not(child(rng)),
         6 => Tree::Negate(child(rng)),
         7 => Tree::Postfix(POSTFIX[rng.below(POSTFIX.len())], child(rng)),
         8 => {
             let items = (0..=rng.below(3))
-                .map(|_| tree(rng, depth - 1, quoted, normalized_only))
+                .map(|_| tree(rng, depth - 1, quoted))
                 .collect();
             Tree::In(child(rng), items, rng.percent(50))
         }
@@ -142,7 +145,14 @@ fn tree(rng: &mut Rng, depth: u32, quoted: &'static str, normalized_only: bool) 
         12 => Tree::AtTimeZone(child(rng), child(rng)),
         13 => Tree::Coalesce(child(rng), child(rng)),
         14 => Tree::Cast(child(rng)),
-        _ => Tree::Case(child(rng), child(rng), child(rng)),
+        15 => {
+            let otherwise = rng.percent(70).then(|| child(rng));
+            Tree::Case(child(rng), child(rng), otherwise)
+        }
+        16 => Tree::Extract(child(rng)),
+        17 => Tree::Substring(child(rng), child(rng), child(rng)),
+        18 => Tree::Position(child(rng), child(rng)),
+        _ => Tree::Tuple(child(rng), child(rng)),
     }
 }
 
@@ -154,6 +164,8 @@ struct Spelling {
     flip_name_case: bool,
     flip_keyword_case: bool,
     swap_symmetric_operands: bool,
+    /// Spells some casts `x::T`, which only PostgreSQL among the dialects here reads.
+    double_colon_cast: bool,
 }
 
 fn keyword(text: &str, spelling: Spelling, rng: &mut Rng) -> String {
@@ -259,25 +271,50 @@ fn spell(tree: &Tree, spelling: Spelling, rng: &mut Rng) -> String {
                 keyword("AT TIME ZONE", spelling, rng)
             )
         }
+        // A function name is a name, so its case follows the dialect's folding.
         Tree::Coalesce(first, second) => {
-            let name = keyword("COALESCE", spelling, rng);
+            let name = if spelling.flip_name_case && rng.percent(50) {
+                "coalesce"
+            } else {
+                "COALESCE"
+            };
             format!("{name}({}, {})", operand(first, rng), operand(second, rng))
         }
         Tree::Cast(inner) => {
-            format!(
-                "{}({} AS INTEGER)",
-                keyword("CAST", spelling, rng),
-                operand(inner, rng)
-            )
+            let inner = operand(inner, rng);
+            if spelling.double_colon_cast && rng.percent(50) {
+                format!("{inner}::INTEGER")
+            } else {
+                format!("{}({inner} AS INTEGER)", keyword("CAST", spelling, rng))
+            }
         }
         Tree::Case(condition, then, otherwise) => {
-            let (condition, then, otherwise) = (
-                operand(condition, rng),
-                operand(then, rng),
-                operand(otherwise, rng),
-            );
+            let (condition, then) = (operand(condition, rng), operand(then, rng));
+            let otherwise = match otherwise {
+                Some(otherwise) => format!(" ELSE {}", operand(otherwise, rng)),
+                None if spelling.flip_keyword_case && rng.percent(50) => {
+                    format!(" {}", keyword("ELSE NULL", spelling, rng))
+                }
+                None => String::new(),
+            };
             let case = keyword("CASE", spelling, rng);
-            format!("{case} WHEN {condition} THEN {then} ELSE {otherwise} END")
+            format!("{case} WHEN {condition} THEN {then}{otherwise} END")
+        }
+        Tree::Extract(inner) => {
+            let extract = keyword("EXTRACT", spelling, rng);
+            format!("{extract}(YEAR FROM {})", operand(inner, rng))
+        }
+        Tree::Substring(text, from, length) => {
+            let (text, from, length) =
+                (operand(text, rng), operand(from, rng), operand(length, rng));
+            format!("SUBSTRING({text} FROM {from} FOR {length})")
+        }
+        Tree::Position(needle, haystack) => {
+            let (needle, haystack) = (operand(needle, rng), operand(haystack, rng));
+            format!("POSITION({needle} IN {haystack})")
+        }
+        Tree::Tuple(first, second) => {
+            format!("({}, {})", operand(first, rng), operand(second, rng))
         }
     }
 }
@@ -313,11 +350,7 @@ fn canonical_text_means_what_the_input_means() {
         let folding = Folding::of(dialect);
         for seed in 0..SEEDS {
             let mut rng = Rng::new(seed);
-            let predicate = spell(
-                &tree(&mut rng, 3, quoted, false),
-                Spelling::default(),
-                &mut rng,
-            );
+            let predicate = spell(&tree(&mut rng, 3, quoted), Spelling::default(), &mut rng);
             let Some(input) = parse(dialect, &predicate) else {
                 continue;
             };
@@ -336,7 +369,7 @@ fn canonical_text_means_what_the_input_means() {
 }
 
 #[test]
-fn equivalent_spellings_of_normalized_forms_agree() {
+fn equivalent_spellings_agree() {
     let reference = Spelling {
         parenthesize_every_operand: true,
         ..Spelling::default()
@@ -350,10 +383,11 @@ fn equivalent_spellings_of_normalized_forms_agree() {
             flip_name_case: !dialect.is::<GenericDialect>(),
             flip_keyword_case: true,
             swap_symmetric_operands: true,
+            double_colon_cast: dialect.is::<PostgreSqlDialect>(),
         };
         for seed in 0..SEEDS {
             let mut rng = Rng::new(seed);
-            let generated = tree(&mut rng, 3, quoted, true);
+            let generated = tree(&mut rng, 3, quoted);
             let predicate = spell(&generated, Spelling::default(), &mut rng);
             let (Some(input), Some(intended)) = (
                 parse(dialect, &predicate),

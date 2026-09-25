@@ -6,8 +6,10 @@ use core::hash::{Hash, Hasher};
 
 use seahash::SeaHasher;
 use sqlparser::ast::{
-    BinaryOperator, CastKind, Distinct, Expr, Ident, LimitClause, ObjectName, Query, Select,
-    SelectModifiers, SetExpr, Statement, TableFactor, UnaryOperator, Value,
+    AccessExpr, BinaryOperator, CastKind, CeilFloorKind, DateTimeField, Distinct, Expr,
+    ExtractSyntax, Function, FunctionArg, FunctionArgExpr, FunctionArguments, Ident, Interval,
+    LimitClause, ObjectName, Query, Select, SelectModifiers, SetExpr, Statement, Subscript,
+    TableFactor, UnaryOperator, Value,
 };
 use sqlparser::dialect::{AnsiDialect, Dialect, MySqlDialect, PostgreSqlDialect, SQLiteDialect};
 use sqlparser::keywords::ALL_KEYWORDS;
@@ -524,7 +526,7 @@ fn normalize_expr_inner(
         } => {
             let columns = columns
                 .iter()
-                .map(|column| object_name_text(column, context))
+                .map(|column| object_name_text(column, NamePlace::Operand, context))
                 .collect::<Result<Vec<_>, _>>()?
                 .join(", ");
             reject_lossy_quoting(&match_value.value)?;
@@ -537,8 +539,12 @@ fn normalize_expr_inner(
             )
         }
         Expr::Nested(inner) => normalize_expr_inner(inner, depth + 1, tight_parent, context)?,
-        Expr::Identifier(identifier) => identifier_text(identifier, context.folding)?,
-        Expr::CompoundIdentifier(parts) => qualified_name_text(parts.iter(), context)?,
+        Expr::Identifier(identifier) => {
+            identifier_text(identifier, context.folding, NamePlace::Operand, context)?
+        }
+        Expr::CompoundIdentifier(parts) => {
+            qualified_name_text(parts.iter(), NamePlace::Operand, context)?
+        }
         Expr::Value(value) => {
             reject_lossy_quoting(&value.value)?;
             format!("{}", value.value)
@@ -550,9 +556,205 @@ fn normalize_expr_inner(
                 "JSON path access is not supported".to_string(),
             ));
         }
-        Expr::Function(function) => {
-            reject_quantifier_name(&function.name)?;
-            format!("{function}")
+        Expr::Function(function) => function_text(function, depth, context)?,
+        // `x::T` and `CAST(x AS T)` are one cast, and every dialect reads the `CAST` spelling.
+        Expr::Cast {
+            kind,
+            expr,
+            data_type,
+            format,
+        } => {
+            if format.is_some() {
+                return Err(CanonicalizeError::Unsupported(
+                    "CAST with FORMAT is not supported".to_string(),
+                ));
+            }
+            let keyword = match kind {
+                CastKind::Cast | CastKind::DoubleColon => "CAST",
+                CastKind::TryCast => "TRY_CAST",
+                CastKind::SafeCast => "SAFE_CAST",
+            };
+            let expr = normalize_expr_inner(expr, depth + 1, false, context)?;
+            format!("{keyword}({expr} AS {data_type})")
+        }
+        Expr::Convert {
+            is_try,
+            expr,
+            data_type,
+            charset,
+            target_before_value,
+            styles,
+        } => {
+            // The SQL Server form puts the type first and takes styles.
+            if *target_before_value || !styles.is_empty() {
+                return Err(CanonicalizeError::Unsupported(
+                    "CONVERT with the type first is not supported".to_string(),
+                ));
+            }
+            let target = match (data_type, charset) {
+                (Some(data_type), Some(charset)) => {
+                    format!(", {data_type} CHARACTER SET {charset}")
+                }
+                (Some(data_type), None) => format!(", {data_type}"),
+                (None, Some(charset)) => format!(" USING {charset}"),
+                (None, None) => {
+                    return Err(CanonicalizeError::Unsupported(
+                        "CONVERT without a target is not supported".to_string(),
+                    ));
+                }
+            };
+            let prefix = if *is_try { "TRY_" } else { "" };
+            let expr = normalize_expr_inner(expr, depth + 1, false, context)?;
+            format!("{prefix}CONVERT({expr}{target})")
+        }
+        Expr::Extract {
+            field,
+            syntax,
+            expr,
+        } => {
+            let expr = normalize_expr_inner(expr, depth + 1, false, context)?;
+            match syntax {
+                ExtractSyntax::From => format!("EXTRACT({field} FROM {expr})"),
+                ExtractSyntax::Comma => format!("EXTRACT({field}, {expr})"),
+            }
+        }
+        Expr::Ceil { expr, field } => rounding_text("CEIL", expr, field, depth, context)?,
+        Expr::Floor { expr, field } => rounding_text("FLOOR", expr, field, depth, context)?,
+        // `IN` could continue the first operand, so it is enclosed like any operand.
+        Expr::Position { expr, r#in } => format!(
+            "POSITION({} IN {})",
+            normalize_expr_inner(expr, depth + 1, true, context)?,
+            normalize_expr_inner(r#in, depth + 1, false, context)?
+        ),
+        Expr::Substring {
+            expr,
+            substring_from,
+            substring_for,
+            special,
+            shorthand,
+        } => {
+            let name = if *shorthand { "SUBSTR" } else { "SUBSTRING" };
+            let (from, length) = if *special {
+                (", ", ", ")
+            } else {
+                (" FROM ", " FOR ")
+            };
+            let mut text = format!(
+                "{name}({}",
+                normalize_expr_inner(expr, depth + 1, false, context)?
+            );
+            for (separator, part) in [(from, substring_from), (length, substring_for)] {
+                if let Some(part) = part {
+                    text.push_str(separator);
+                    text.push_str(&normalize_expr_inner(part, depth + 1, false, context)?);
+                }
+            }
+            text.push(')');
+            text
+        }
+        Expr::Trim {
+            expr,
+            trim_where,
+            trim_what,
+            trim_characters,
+        } => {
+            let mut text = String::from("TRIM(");
+            if let Some(trim_where) = trim_where {
+                text.push_str(&format!("{trim_where} "));
+            }
+            if let Some(trim_what) = trim_what {
+                text.push_str(&normalize_expr_inner(trim_what, depth + 1, false, context)?);
+                text.push_str(" FROM ");
+            }
+            text.push_str(&normalize_expr_inner(expr, depth + 1, false, context)?);
+            if let Some(characters) = trim_characters {
+                text.push_str(", ");
+                text.push_str(&list_text(characters, depth, context)?);
+            }
+            text.push(')');
+            text
+        }
+        Expr::Overlay {
+            expr,
+            overlay_what,
+            overlay_from,
+            overlay_for,
+        } => {
+            let mut text = format!(
+                "OVERLAY({} PLACING {} FROM {}",
+                normalize_expr_inner(expr, depth + 1, false, context)?,
+                normalize_expr_inner(overlay_what, depth + 1, false, context)?,
+                normalize_expr_inner(overlay_from, depth + 1, false, context)?
+            );
+            if let Some(overlay_for) = overlay_for {
+                text.push_str(" FOR ");
+                text.push_str(&normalize_expr_inner(
+                    overlay_for,
+                    depth + 1,
+                    false,
+                    context,
+                )?);
+            }
+            text.push(')');
+            text
+        }
+        Expr::Case {
+            case_token: _,
+            end_token: _,
+            operand,
+            conditions,
+            else_result,
+        } => {
+            let mut text = String::from("CASE");
+            if let Some(operand) = operand {
+                text.push(' ');
+                text.push_str(&normalize_expr_inner(operand, depth + 1, false, context)?);
+            }
+            for when in conditions {
+                text.push_str(" WHEN ");
+                text.push_str(&normalize_expr_inner(
+                    &when.condition,
+                    depth + 1,
+                    false,
+                    context,
+                )?);
+                text.push_str(" THEN ");
+                text.push_str(&normalize_expr_inner(
+                    &when.result,
+                    depth + 1,
+                    false,
+                    context,
+                )?);
+            }
+            // `ELSE NULL` is what a missing `ELSE` yields.
+            if let Some(result) = else_result.as_deref().filter(|result| !is_null(result)) {
+                text.push_str(" ELSE ");
+                text.push_str(&normalize_expr_inner(result, depth + 1, false, context)?);
+            }
+            text.push_str(" END");
+            text
+        }
+        Expr::Tuple(items) => format!("({})", list_text(items, depth, context)?),
+        Expr::Array(array) => {
+            let keyword = if array.named { "ARRAY" } else { "" };
+            format!("{keyword}[{}]", list_text(&array.elem, depth, context)?)
+        }
+        Expr::Interval(interval) => interval_text(interval, depth, context)?,
+        Expr::TypedString(typed) => {
+            if typed.uses_odbc_syntax {
+                return Err(CanonicalizeError::Unsupported(
+                    "ODBC escape literals are not supported".to_string(),
+                ));
+            }
+            reject_lossy_quoting(&typed.value.value)?;
+            format!("{} {}", typed.data_type, typed.value)
+        }
+        Expr::Prefixed { prefix, value } => format!(
+            "{prefix} {}",
+            normalize_expr_inner(value, depth + 1, true, context)?
+        ),
+        Expr::CompoundFieldAccess { root, access_chain } => {
+            field_access_text(root, access_chain, depth, context)?
         }
         _ => format!("{expr}"),
     };
@@ -690,6 +892,7 @@ fn reject_quantifier_name(name: &ObjectName) -> Result<(), CanonicalizeError> {
 /// Spells a dotted name, folding the last part as a column and the others as qualifiers.
 fn qualified_name_text<'i>(
     parts: impl ExactSizeIterator<Item = &'i Ident>,
+    place: NamePlace,
     context: &Canonicalizer<'_>,
 ) -> Result<String, CanonicalizeError> {
     let column = parts.len().saturating_sub(1);
@@ -701,15 +904,226 @@ fn qualified_name_text<'i>(
             } else {
                 context.qualifier_folding
             };
-            identifier_text(part, folding)
+            identifier_text(part, folding, place, context)
         })
         .collect::<Result<Vec<_>, _>>()?
         .join("."))
 }
 
+/// Spells a plain call, refusing the aggregate and window forms no `WHERE` clause can hold.
+fn function_text(
+    function: &Function,
+    depth: usize,
+    context: &Canonicalizer<'_>,
+) -> Result<String, CanonicalizeError> {
+    let Function {
+        name,
+        uses_odbc_syntax,
+        parameters,
+        args,
+        filter,
+        null_treatment,
+        over,
+        within_group,
+    } = function;
+    reject_quantifier_name(name)?;
+    let plain = !*uses_odbc_syntax
+        && matches!(parameters, FunctionArguments::None)
+        && filter.is_none()
+        && null_treatment.is_none()
+        && over.is_none()
+        && within_group.is_empty();
+    let unsupported =
+        || CanonicalizeError::Unsupported(format!("Call to {name} is not a plain function call"));
+    if !plain {
+        return Err(unsupported());
+    }
+    let name = object_name_text(name, NamePlace::Function, context)?;
+    match args {
+        FunctionArguments::None => Ok(name),
+        FunctionArguments::Subquery(_) => Err(unsupported()),
+        FunctionArguments::List(list) => {
+            if list.duplicate_treatment.is_some() || !list.clauses.is_empty() {
+                return Err(unsupported());
+            }
+            let args = list
+                .args
+                .iter()
+                .map(|arg| match arg {
+                    // Enclosed like an operand, because a bare `a IN (b)` argument makes
+                    // `POSITION(a IN (b))` read back as the special form of `POSITION`.
+                    FunctionArg::Unnamed(FunctionArgExpr::Expr(arg)) => {
+                        normalize_expr_inner(arg, depth + 1, true, context)
+                    }
+                    _ => Err(unsupported()),
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(format!("{name}({})", args.join(", ")))
+        }
+    }
+}
+
+/// Spells a comma separated list of expressions in their written order.
+fn list_text(
+    items: &[Expr],
+    depth: usize,
+    context: &Canonicalizer<'_>,
+) -> Result<String, CanonicalizeError> {
+    Ok(items
+        .iter()
+        .map(|item| normalize_expr_inner(item, depth + 1, false, context))
+        .collect::<Result<Vec<_>, _>>()?
+        .join(", "))
+}
+
+/// Spells `CEIL` or `FLOOR` with its optional date part or scale.
+fn rounding_text(
+    name: &str,
+    expr: &Expr,
+    field: &CeilFloorKind,
+    depth: usize,
+    context: &Canonicalizer<'_>,
+) -> Result<String, CanonicalizeError> {
+    let expr = normalize_expr_inner(expr, depth + 1, false, context)?;
+    Ok(match field {
+        CeilFloorKind::DateTimeField(DateTimeField::NoDateTime) => format!("{name}({expr})"),
+        CeilFloorKind::DateTimeField(field) => format!("{name}({expr} TO {field})"),
+        CeilFloorKind::Scale(scale) => format!("{name}({expr}, {scale})"),
+    })
+}
+
+/// Spells an interval with its value normalized and its qualifiers as sqlparser writes them.
+fn interval_text(
+    interval: &Interval,
+    depth: usize,
+    context: &Canonicalizer<'_>,
+) -> Result<String, CanonicalizeError> {
+    let Interval {
+        value,
+        leading_field,
+        leading_precision,
+        last_field,
+        fractional_seconds_precision,
+    } = interval;
+    let mut text = format!(
+        "INTERVAL {}",
+        normalize_expr_inner(value, depth + 1, true, context)?
+    );
+    if let (Some(DateTimeField::Second), Some(leading), Some(fractional)) = (
+        leading_field,
+        leading_precision,
+        fractional_seconds_precision,
+    ) {
+        text.push_str(&format!(" SECOND ({leading}, {fractional})"));
+        return Ok(text);
+    }
+    if let Some(leading_field) = leading_field {
+        text.push_str(&format!(" {leading_field}"));
+    }
+    if let Some(leading_precision) = leading_precision {
+        text.push_str(&format!(" ({leading_precision})"));
+    }
+    if let Some(last_field) = last_field {
+        text.push_str(&format!(" TO {last_field}"));
+    }
+    if let Some(fractional) = fractional_seconds_precision {
+        text.push_str(&format!(" ({fractional})"));
+    }
+    Ok(text)
+}
+
+/// Spells a field or subscript access.
+///
+/// Parentheses around the root decide what it is, since `(c).f` reads a field of the value
+/// `c` while `c.f` may read column `f` of table `c`, so a parenthesized root keeps one pair.
+/// A bare name in the access may be a table, so it folds with the qualifier rule.
+fn field_access_text(
+    root: &Expr,
+    access_chain: &[AccessExpr],
+    depth: usize,
+    context: &Canonicalizer<'_>,
+) -> Result<String, CanonicalizeError> {
+    let mut text = match root {
+        Expr::Nested(inner) => format!(
+            "({})",
+            normalize_expr_inner(inner, depth + 1, false, context)?
+        ),
+        Expr::Identifier(name) => {
+            identifier_text(name, context.qualifier_folding, NamePlace::Operand, context)?
+        }
+        root => normalize_expr_inner(root, depth + 1, true, context)?,
+    };
+    for access in access_chain {
+        match access {
+            AccessExpr::Dot(Expr::Identifier(name)) => {
+                text.push('.');
+                text.push_str(&identifier_text(
+                    name,
+                    context.qualifier_folding,
+                    NamePlace::Operand,
+                    context,
+                )?);
+            }
+            // sqlparser spaces a numeric field so it does not read as a decimal point.
+            AccessExpr::Dot(Expr::Value(value)) if matches!(value.value, Value::Number(..)) => {
+                text.push_str(&format!(" . {value}"));
+            }
+            AccessExpr::Dot(field) => {
+                text.push('.');
+                text.push_str(&normalize_expr_inner(field, depth + 1, true, context)?);
+            }
+            AccessExpr::Subscript(Subscript::Index { index }) => {
+                text.push('[');
+                text.push_str(&normalize_expr_inner(index, depth + 1, false, context)?);
+                text.push(']');
+            }
+            AccessExpr::Subscript(Subscript::Slice {
+                lower_bound,
+                upper_bound,
+                stride,
+            }) => {
+                text.push('[');
+                if let Some(lower_bound) = lower_bound {
+                    text.push_str(&normalize_expr_inner(
+                        lower_bound,
+                        depth + 1,
+                        false,
+                        context,
+                    )?);
+                }
+                text.push(':');
+                if let Some(upper_bound) = upper_bound {
+                    text.push_str(&normalize_expr_inner(
+                        upper_bound,
+                        depth + 1,
+                        false,
+                        context,
+                    )?);
+                }
+                if let Some(stride) = stride {
+                    text.push(':');
+                    text.push_str(&normalize_expr_inner(stride, depth + 1, false, context)?);
+                }
+                text.push(']');
+            }
+        }
+    }
+    Ok(text)
+}
+
+/// Reports whether `expr` is `NULL`, however many parentheses enclose it.
+fn is_null(expr: &Expr) -> bool {
+    match expr {
+        Expr::Nested(inner) => is_null(inner),
+        Expr::Value(value) => matches!(value.value, Value::Null),
+        _ => false,
+    }
+}
+
 /// Spells an object name that names a column, refusing a part computed by a function.
 fn object_name_text(
     name: &ObjectName,
+    place: NamePlace,
     context: &Canonicalizer<'_>,
 ) -> Result<String, CanonicalizeError> {
     let parts = name
@@ -721,7 +1135,7 @@ fn object_name_text(
             })
         })
         .collect::<Result<Vec<_>, _>>()?;
-    qualified_name_text(parts.into_iter(), context)
+    qualified_name_text(parts.into_iter(), place, context)
 }
 
 /// Reports whether `expr` prints as text no neighbouring operator can split.
@@ -736,8 +1150,6 @@ const fn encloses_itself(expr: &Expr) -> bool {
         // NOT binds looser than any operator that can enclose it.
         Expr::UnaryOp { op, .. } => !matches!(op, UnaryOperator::Not),
         Expr::Exists { negated, .. } => !*negated,
-        // `x::T` prints its operand bare, and the operator's binding is dialect specific.
-        Expr::Cast { kind, .. } => !matches!(kind, CastKind::DoubleColon),
         Expr::Identifier(_)
         | Expr::CompoundIdentifier(_)
         | Expr::CompoundFieldAccess { .. }
@@ -749,6 +1161,7 @@ const fn encloses_itself(expr: &Expr) -> bool {
         | Expr::IsDistinctFrom(..)
         | Expr::IsNotDistinctFrom(..)
         | Expr::Function(_)
+        | Expr::Cast { .. }
         | Expr::Convert { .. }
         | Expr::Extract { .. }
         | Expr::Ceil { .. }
@@ -853,9 +1266,24 @@ impl<'a> Canonicalizer<'a> {
     }
 }
 
+/// Where a name stands in canonical text.
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum NamePlace {
+    /// A column, table or field name, which a keyword spelling can turn into an expression.
+    Operand,
+    /// A function name, which keeps whether it was quoted, because MySQL looks a quoted
+    /// function name up among stored functions and not among its own.
+    Function,
+}
+
 /// Resolves an identifier to the name the database would see, then spells it the one way
 /// that reads back as that same name.
-fn identifier_text(identifier: &Ident, folding: Folding) -> Result<String, CanonicalizeError> {
+fn identifier_text(
+    identifier: &Ident,
+    folding: Folding,
+    place: NamePlace,
+    context: &Canonicalizer<'_>,
+) -> Result<String, CanonicalizeError> {
     let quoted = identifier.quote_style.is_some();
     // Case folding rules are stated for ASCII. Anything else keeps its exact spelling,
     // because merging two names the database might separate is the unsafe direction.
@@ -871,12 +1299,22 @@ fn identifier_text(identifier: &Ident, folding: Folding) -> Result<String, Canon
         _ => identifier.value.clone(),
     };
 
-    if bare_spelling_is_faithful(&resolved, quoted, folding) {
+    if bare_spelling_is_faithful(&resolved, quoted, folding, place) {
         return Ok(resolved);
+    }
+    // Where no folding rule ties the two spellings, quoting a bare name could name another
+    // column, so a bare name that cannot stay bare is refused.
+    if !quoted && folding == Folding::Exact {
+        return Err(CanonicalizeError::Unsupported(format!(
+            "Name {resolved} reads as a keyword out of its place"
+        )));
     }
     // A delimited name escapes its own delimiter by doubling it, so `a"b` is written
     // `"a""b"`. Emitting the delimiter raw produces a name that reads back as something else.
-    let quote = identifier.quote_style.unwrap_or('"');
+    let quote = identifier
+        .quote_style
+        .or_else(|| context.dialect.identifier_quote_style(&resolved))
+        .unwrap_or('"');
     let mut delimited = String::with_capacity(resolved.len() + 2);
     delimited.push(quote);
     for character in resolved.chars() {
@@ -893,13 +1331,16 @@ fn identifier_text(identifier: &Ident, folding: Folding) -> Result<String, Canon
 ///
 /// The answer must depend only on the name, never on how canonicalization is going, or one
 /// predicate could end up with two spellings and so two keys.
-fn bare_spelling_is_faithful(name: &str, quoted: bool, folding: Folding) -> bool {
+fn bare_spelling_is_faithful(name: &str, quoted: bool, folding: Folding, place: NamePlace) -> bool {
     if !quoted {
-        // This dialect already accepted the name without quotes, and folding only applied the
-        // change the dialect makes itself, so writing it bare reads back as the same name.
-        return true;
+        // Folding only applied the change the dialect makes itself, so the bare name is the
+        // same name as long as it reads as a name wherever canonicalization puts it. A call
+        // keeps its name, because it is only a call once its name failed as special syntax,
+        // and its enclosed arguments fail that syntax again.
+        return place == NamePlace::Function || !starts_expression_syntax(name);
     }
-    if !is_plain_non_keyword(name) {
+    // A quoted function name stays quoted, because MySQL looks it up among stored functions.
+    if place == NamePlace::Function || !is_plain_non_keyword(name) {
         return false;
     }
     match folding {
@@ -910,6 +1351,72 @@ fn bare_spelling_is_faithful(name: &str, quoted: bool, folding: Folding) -> bool
         Folding::CaseInsensitive => true,
         Folding::Exact => false,
     }
+}
+
+/// Reports whether `name` is spelled like a keyword of any dialect.
+fn is_keyword(name: &str) -> bool {
+    let upper = || name.bytes().map(|byte| byte.to_ascii_uppercase());
+    ALL_KEYWORDS
+        .binary_search_by(|keyword| keyword.bytes().cmp(upper()))
+        .is_ok()
+}
+
+/// Words sqlparser reads as the start of an expression, taking one as a name only when the
+/// expression it starts fails to parse. Such a name, like `NOT` inside `POSITION(NOT - x IN
+/// y)`, reads as the keyword again once canonicalization moves it. The list is the one
+/// `parse_expr_prefix_by_reserved_word` handles in sqlparser 0.63.
+const EXPRESSION_KEYWORDS: &[&str] = &[
+    "ARRAY",
+    "BOX",
+    "CASE",
+    "CAST",
+    "CEIL",
+    "CIRCLE",
+    "CONVERT",
+    "CURRENT_CATALOG",
+    "CURRENT_DATE",
+    "CURRENT_TIME",
+    "CURRENT_TIMESTAMP",
+    "CURRENT_USER",
+    "EXISTS",
+    "EXTRACT",
+    "FALSE",
+    "FLOOR",
+    "INTERVAL",
+    "LAMBDA",
+    "LINE",
+    "LOCALTIME",
+    "LOCALTIMESTAMP",
+    "LSEG",
+    "MAP",
+    "MATCH",
+    "NOT",
+    "NULL",
+    "OVERLAY",
+    "PATH",
+    "POINT",
+    "POLYGON",
+    "POSITION",
+    "PRIOR",
+    "SAFE_CAST",
+    "SELECT",
+    "SESSION_USER",
+    "STRUCT",
+    "SUBSTR",
+    "SUBSTRING",
+    "TRIM",
+    "TRUE",
+    "TRY_CAST",
+    "TRY_CONVERT",
+    "USER",
+    "WITH",
+];
+
+/// Reports whether sqlparser may read `name` written bare as the start of an expression.
+fn starts_expression_syntax(name: &str) -> bool {
+    EXPRESSION_KEYWORDS
+        .iter()
+        .any(|keyword| keyword.eq_ignore_ascii_case(name))
 }
 
 /// Reports whether `name` is a bare word no dialect reads as a keyword.
@@ -928,9 +1435,7 @@ fn is_plain_non_keyword(name: &str) -> bool {
     {
         return false;
     }
-    ALL_KEYWORDS
-        .binary_search(&name.to_ascii_uppercase().as_str())
-        .is_err()
+    !is_keyword(name)
 }
 
 /// Rejects a literal the parser cannot print without changing its value.

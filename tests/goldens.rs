@@ -859,6 +859,42 @@ const GOLDENS: &[Golden] = &[
         normalized: "flag IS UNKNOWN",
         hash: 268016679043104776737949376478094949884,
     },
+    Golden {
+        dialect: DialectKind::PostgreSql,
+        sql: "SELECT * FROM t WHERE LOWER(Email) = 'a@b.c'",
+        normalized: "('a@b.c' = lower(email))",
+        hash: 252573738667588764506528454302052192055,
+    },
+    Golden {
+        dialect: DialectKind::PostgreSql,
+        sql: "SELECT * FROM t WHERE Amount::NUMERIC > 10",
+        normalized: "(CAST(amount AS NUMERIC) > 10)",
+        hash: 89646719716099434755481402106727810743,
+    },
+    Golden {
+        dialect: DialectKind::PostgreSql,
+        sql: "SELECT * FROM t WHERE CASE WHEN Paid THEN 1 ELSE NULL END = 1",
+        normalized: "(1 = CASE WHEN paid THEN 1 END)",
+        hash: 302285422036760154290977927312778686673,
+    },
+    Golden {
+        dialect: DialectKind::MySql,
+        sql: "SELECT * FROM t WHERE EXTRACT(YEAR FROM Created) = 2026",
+        normalized: "(2026 = EXTRACT(YEAR FROM created))",
+        hash: 154063077115065842130430037709384758435,
+    },
+    Golden {
+        dialect: DialectKind::MySql,
+        sql: "SELECT * FROM t WHERE CONVERT(Name USING utf8mb4) = 'x'",
+        normalized: "('x' = CONVERT(name USING utf8mb4))",
+        hash: 73960171852098668834036988794385022741,
+    },
+    Golden {
+        dialect: DialectKind::SQLite,
+        sql: "SELECT * FROM t WHERE SUBSTR(Code, 1, 2) = 'ab'",
+        normalized: "('ab' = SUBSTR(code, 1, 2))",
+        hash: 69633333979695294109422699580078467064,
+    },
 ];
 
 fn normalize_with_dialect(sql: &str, dialect: DialectKind) -> String {
