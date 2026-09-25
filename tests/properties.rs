@@ -13,12 +13,10 @@ fn normalize(sql: &str) -> String {
 }
 
 fn assert_idempotent(canonical: &str) {
-    let sql = if canonical == "TRUE" {
-        "SELECT * FROM t".to_string()
-    } else {
-        format!("SELECT * FROM t WHERE {canonical}")
-    };
-    assert_eq!(normalize(&sql), canonical);
+    assert_eq!(
+        normalize(&format!("SELECT * FROM t WHERE {canonical}")),
+        canonical
+    );
 }
 
 fn term(identifier: &str, value: u16) -> String {

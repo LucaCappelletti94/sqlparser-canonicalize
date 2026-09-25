@@ -20,8 +20,6 @@ use crate::CanonicalizeError;
 
 const MAX_EXPR_DEPTH: usize = 128;
 const MAX_SQL_LEN: usize = 8192;
-/// Canonical text for a `SELECT` with no `WHERE` clause.
-const NO_FILTER: &str = "TRUE";
 
 impl<'a> Canonicalizer<'a> {
     /// Parses one `SELECT` and returns canonical text for its `WHERE` clause.
@@ -71,10 +69,15 @@ fn normalize_where_clause_inner(
     where_expr: Option<&Expr>,
     context: &Canonicalizer<'_>,
 ) -> Result<String, CanonicalizeError> {
-    where_expr.map_or_else(
-        || Ok(NO_FILTER.to_string()),
-        |expr| normalize_expr_inner(expr, 0, false, context),
-    )
+    match where_expr {
+        Some(expr) => normalize_expr_inner(expr, 0, false, context),
+        // A missing filter keeps every row, as `WHERE TRUE` does, so it is spelled as that
+        // filter.
+        None => {
+            let every_row = Expr::Value(Value::Boolean(true).with_empty_span());
+            normalize_expr_inner(&every_row, 0, false, context)
+        }
+    }
 }
 
 /// Returns the canonical text only if reading it back as an expression reproduces it byte
@@ -87,9 +90,6 @@ fn confirm_reads_back_as_itself(
     canonical: String,
     context: &Canonicalizer<'_>,
 ) -> Result<String, CanonicalizeError> {
-    if canonical == NO_FILTER {
-        return Ok(canonical);
-    }
     if read_back(&canonical, context).is_some_and(|again| again == canonical) {
         Ok(canonical)
     } else {

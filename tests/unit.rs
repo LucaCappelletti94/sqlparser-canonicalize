@@ -113,7 +113,7 @@ fn test_normalize_no_where() {
     assert!(result.is_ok());
 
     let normalized = result.unwrap();
-    assert_eq!(normalized, "TRUE");
+    assert_eq!(normalized, "true");
 }
 
 #[test]
@@ -208,7 +208,7 @@ fn test_normalize_no_where_clause() {
     let sql = "SELECT * FROM t";
     let result = Canonicalizer::new(&dialect).normalize_sql(sql).unwrap();
 
-    assert_eq!(result, "TRUE");
+    assert_eq!(result, "true");
 }
 
 #[test]
@@ -1436,6 +1436,40 @@ fn a_caller_built_form_no_predicate_holds_is_refused() {
                 Err(CanonicalizeError::Unsupported(_))
             ),
             "{expr:?}"
+        );
+    }
+}
+
+#[test]
+fn a_missing_filter_is_the_filter_true() {
+    for dialect in [
+        &PostgreSqlDialect {} as &dyn Dialect,
+        &MySqlDialect {},
+        &SQLiteDialect {},
+        &AnsiDialect {},
+        &GenericDialect {},
+    ] {
+        let canonicalizer = Canonicalizer::new(dialect);
+        let texts: Vec<_> = [
+            "SELECT * FROM t",
+            "SELECT * FROM t WHERE TRUE",
+            "SELECT * FROM t WHERE (true)",
+        ]
+        .into_iter()
+        .map(|sql| canonicalizer.normalize_sql(sql))
+        .collect();
+        assert_eq!(
+            texts,
+            [
+                Ok("true".to_string()),
+                Ok("true".to_string()),
+                Ok("true".to_string())
+            ],
+            "{dialect:?}"
+        );
+        assert_eq!(
+            canonicalizer.normalize_where_clause(None),
+            Ok("true".to_string())
         );
     }
 }
