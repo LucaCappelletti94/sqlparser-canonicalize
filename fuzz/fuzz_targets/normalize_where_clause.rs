@@ -1,5 +1,8 @@
 #![no_main]
 
+#[path = "../../tests/oracle/mod.rs"]
+mod oracle;
+
 use libfuzzer_sys::fuzz_target;
 use sqlparser::ast::{SetExpr, Statement};
 use sqlparser::dialect::{
@@ -51,6 +54,17 @@ fuzz_target!(|data: &[u8]| {
         .try_with_sql(&canonical)
         .and_then(|mut parser| parser.parse_expr())
         .expect("accepted canonical text must parse as one expression");
+    // Parsed and read back by one dialect, the canonical text keeps the input's meaning.
+    if parse_selector % 5 == verify_selector % 5
+        && let Some(input) = select.selection.as_ref()
+    {
+        let folding = oracle::Folding::of(verify_dialect);
+        assert_eq!(
+            oracle::meaning(&expr, folding),
+            oracle::meaning(input, folding),
+            "canonical text {canonical} means something other than the input"
+        );
+    }
     assert_eq!(
         Canonicalizer::new(verify_dialect)
             .normalize_where_clause(Some(&expr))
