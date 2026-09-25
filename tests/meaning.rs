@@ -57,12 +57,13 @@ enum Tree {
     Substring(Box<Tree>, Box<Tree>, Box<Tree>),
     Position(Box<Tree>, Box<Tree>),
     Tuple(Box<Tree>, Box<Tree>),
-    /// Subject, filter and negation of `x [NOT] IN (SELECT a FROM u [WHERE filter])`.
-    InQuery(Box<Tree>, Option<Box<Tree>>, bool),
-    /// Filter and negation of `[NOT] EXISTS (SELECT * FROM u [WHERE filter])`.
-    Exists(Option<Box<Tree>>, bool),
-    /// Filter of the scalar subquery `(SELECT b FROM u [WHERE filter])`.
-    Scalar(Option<Box<Tree>>),
+    /// Subject, filter, negation and table alias of `x [NOT] IN (SELECT a FROM u [v] [WHERE
+    /// filter])`.
+    InQuery(Box<Tree>, Option<Box<Tree>>, bool, bool),
+    /// Filter, negation and table alias of `[NOT] EXISTS (SELECT * FROM u [v] [WHERE filter])`.
+    Exists(Option<Box<Tree>>, bool, bool),
+    /// Filter and table alias of the scalar subquery `(SELECT b FROM u [v] [WHERE filter])`.
+    Scalar(Option<Box<Tree>>, bool),
 }
 
 const BINARY: &[&str] = &[
@@ -156,10 +157,16 @@ fn tree(rng: &mut Rng, depth: u32, quoted: &'static str) -> Tree {
         19 => Tree::Tuple(child(rng), child(rng)),
         20 => {
             let filter = rng.percent(70).then(|| child(rng));
-            Tree::InQuery(child(rng), filter, rng.percent(50))
+            Tree::InQuery(child(rng), filter, rng.percent(50), rng.percent(30))
         }
-        21 => Tree::Exists(rng.percent(70).then(|| child(rng)), rng.percent(50)),
-        _ => Tree::Scalar(rng.percent(70).then(|| child(rng))),
+        21 => {
+            let filter = rng.percent(70).then(|| child(rng));
+            Tree::Exists(filter, rng.percent(50), rng.percent(30))
+        }
+        _ => {
+            let filter = rng.percent(70).then(|| child(rng));
+            Tree::Scalar(filter, rng.percent(30))
+        }
     }
 }
 
@@ -176,8 +183,8 @@ struct Spelling {
     swap_comparison_operands: bool,
     /// Spells some casts `x::T`, which only PostgreSQL among the dialects here reads.
     double_colon_cast: bool,
-    /// Flips the case of the subquery table's name, which only dialects that fold table names
-    /// treat as the same table.
+    /// Flips the case of the subquery table's name and alias, which only dialects that fold
+    /// table names treat as the same table.
     flip_table_case: bool,
     /// Spells a missing subquery filter as `WHERE TRUE` at times, which is the same filter only
     /// where `TRUE` is reserved.
@@ -355,30 +362,47 @@ fn spell(tree: &Tree, spelling: Spelling, rng: &mut Rng) -> String {
         Tree::Tuple(first, second) => {
             format!("({}, {})", operand(first, rng), operand(second, rng))
         }
-        Tree::InQuery(subject, filter, negated) => {
+        Tree::InQuery(subject, filter, negated, aliased) => {
             let subject = operand(subject, rng);
             let not = if *negated { "NOT " } else { "" };
             let not = keyword(not, spelling, rng);
-            let query = subquery("a", filter.as_deref(), spelling, rng);
+            let query = subquery("a", filter.as_deref(), *aliased, spelling, rng);
             format!("{subject} {not}IN ({query})")
         }
-        Tree::Exists(filter, negated) => {
+        Tree::Exists(filter, negated, aliased) => {
             let not = if *negated { "NOT " } else { "" };
             let exists = keyword(&format!("{not}EXISTS"), spelling, rng);
             format!(
                 "{exists} ({})",
-                subquery("*", filter.as_deref(), spelling, rng)
+                subquery("*", filter.as_deref(), *aliased, spelling, rng)
             )
         }
-        Tree::Scalar(filter) => format!("({})", subquery("b", filter.as_deref(), spelling, rng)),
+        Tree::Scalar(filter, aliased) => format!(
+            "({})",
+            subquery("b", filter.as_deref(), *aliased, spelling, rng)
+        ),
     }
 }
 
-fn subquery(projection: &str, filter: Option<&Tree>, spelling: Spelling, rng: &mut Rng) -> String {
-    let table = if spelling.flip_table_case && rng.percent(50) {
-        "U"
+fn subquery(
+    projection: &str,
+    filter: Option<&Tree>,
+    aliased: bool,
+    spelling: Spelling,
+    rng: &mut Rng,
+) -> String {
+    let flip_table_case = |rng: &mut Rng| spelling.flip_table_case && rng.percent(50);
+    let table = if flip_table_case(rng) { "U" } else { "u" };
+    let alias = if aliased {
+        let name = if flip_table_case(rng) { "V" } else { "v" };
+        // `AS` before a table alias is optional, so writing it is a spelling.
+        if spelling.flip_keyword_case && rng.percent(50) {
+            format!(" {} {name}", keyword("AS", spelling, rng))
+        } else {
+            format!(" {name}")
+        }
     } else {
-        "u"
+        String::new()
     };
     let (select, from, filter_keyword) = (
         keyword("SELECT", spelling, rng),
@@ -393,7 +417,7 @@ fn subquery(projection: &str, filter: Option<&Tree>, spelling: Spelling, rng: &m
         }
         None => String::new(),
     };
-    format!("{select} {projection} {from} {table}{filter}")
+    format!("{select} {projection} {from} {table}{alias}{filter}")
 }
 
 fn parse(dialect: &dyn Dialect, predicate: &str) -> Option<Expr> {

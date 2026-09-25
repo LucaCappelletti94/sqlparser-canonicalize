@@ -3,9 +3,9 @@
 //! Two expressions with the same meaning text are the same predicate under every equivalence
 //! the canonicalizer promises. Those are redundant parentheses, the dialect's name folding, the
 //! order of operands and items it treats as unordered, `a > b` for `b < a`, and synonyms such
-//! as `SOME` for `ANY`, `x::T` for `CAST(x AS T)`, a missing `ELSE` for `ELSE NULL`, and a
-//! subquery without `WHERE` for one filtered by `TRUE` where `TRUE` is reserved. Anything else
-//! keeps its structure.
+//! as `SOME` for `ANY`, `x::T` for `CAST(x AS T)`, a missing `ELSE` for `ELSE NULL`, a table
+//! alias with or without `AS`, and a subquery without `WHERE` for one filtered by `TRUE` where
+//! `TRUE` is reserved. Anything else keeps its structure.
 
 use sqlparser::ast::{
     AccessExpr, BinaryOperator, CastKind, CeilFloorKind, Expr, FunctionArg, FunctionArgExpr,
@@ -532,11 +532,16 @@ fn query_meaning(query: &Query, folding: Folding) -> String {
     if !simple {
         return query.to_string();
     }
-    let TableFactor::Table {
-        name, alias: None, ..
-    } = &select.from[0].relation
-    else {
+    let TableFactor::Table { name, alias, .. } = &select.from[0].relation else {
         return query.to_string();
+    };
+    // A table alias only names the table, so its meaning is its folded name.
+    let alias = match alias {
+        None => None,
+        Some(alias) if alias.columns.is_empty() && alias.at.is_none() => {
+            Some(self::name(&alias.name, folding.qualifier))
+        }
+        Some(_) => return query.to_string(),
     };
     let items: Vec<String> = select
         .projection
@@ -563,7 +568,7 @@ fn query_meaning(query: &Query, folding: Folding) -> String {
         .filter(|filter| !(folding.true_is_reserved && is_true(filter)))
         .map(|filter| meaning(filter, folding));
     format!(
-        "(select [{}] {} {filter:?})",
+        "(select [{}] {} {alias:?} {filter:?})",
         items.join(" "),
         table.join(".")
     )
