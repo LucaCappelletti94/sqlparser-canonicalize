@@ -6,8 +6,8 @@ use core::hash::{Hash, Hasher};
 
 use seahash::SeaHasher;
 use sqlparser::ast::{
-    BinaryOperator, Distinct, Expr, Ident, LimitClause, Query, Select, SelectModifiers, SetExpr,
-    Statement, TableFactor, UnaryOperator, Value,
+    BinaryOperator, CastKind, Distinct, Expr, Ident, LimitClause, Query, Select, SelectModifiers,
+    SetExpr, Statement, TableFactor, UnaryOperator, Value,
 };
 use sqlparser::dialect::{AnsiDialect, Dialect, MySqlDialect, PostgreSqlDialect, SQLiteDialect};
 use sqlparser::keywords::ALL_KEYWORDS;
@@ -452,12 +452,23 @@ fn normalize_expr_inner(
             )
         }
         Expr::Nested(inner) => normalize_expr_inner(inner, depth + 1, tight_parent, context)?,
-        Expr::Identifier(identifier) => identifier_text(identifier, context)?,
-        Expr::CompoundIdentifier(parts) => parts
-            .iter()
-            .map(|part| identifier_text(part, context))
-            .collect::<Result<Vec<_>, _>>()?
-            .join("."),
+        Expr::Identifier(identifier) => identifier_text(identifier, context.folding)?,
+        Expr::CompoundIdentifier(parts) => {
+            let column = parts.len().saturating_sub(1);
+            parts
+                .iter()
+                .enumerate()
+                .map(|(index, part)| {
+                    let folding = if index == column {
+                        context.folding
+                    } else {
+                        context.qualifier_folding
+                    };
+                    identifier_text(part, folding)
+                })
+                .collect::<Result<Vec<_>, _>>()?
+                .join(".")
+        }
         Expr::Value(value) => {
             reject_lossy_quoting(&value.value)?;
             format!("{}", value.value)
@@ -465,7 +476,7 @@ fn normalize_expr_inner(
         Expr::Function(function) => format!("{function}"),
         _ => format!("{expr}"),
     };
-    Ok(if tight_parent && prints_unenclosed(expr) {
+    Ok(if tight_parent && !encloses_itself(expr) {
         format!("({text})")
     } else {
         text
@@ -492,28 +503,85 @@ fn infix_text(
     Ok(format!("({left} {operator} {right})"))
 }
 
-/// Reports whether `expr` is a predicate printed without delimiters of its own.
+/// Reports whether `expr` prints as text no neighbouring operator can split.
 ///
-/// How tightly these bind to their neighbours differs by dialect, and `NOT` binds looser than
-/// any operator that can enclose it, so as an operand they are enclosed in parentheses or the
-/// canonical text could read back grouped another way.
-const fn prints_unenclosed(expr: &Expr) -> bool {
-    matches!(
-        expr,
-        Expr::UnaryOp {
-            op: UnaryOperator::Not,
-            ..
-        } | Expr::IsNull(_)
-            | Expr::IsNotNull(_)
-            | Expr::InList { .. }
-            | Expr::InSubquery { .. }
-            | Expr::Between { .. }
-            | Expr::Like { .. }
-            | Expr::ILike { .. }
-    )
+/// Names, literals, forms with delimiters of their own such as calls and `CASE`, and prefix
+/// signs qualify. Every other form is enclosed in parentheses as an operand, because how
+/// tightly it binds differs by dialect and its text could read back grouped another way,
+/// which can give two predicates one key. The match names every variant, so a variant a later
+/// sqlparser adds is classified before the crate builds.
+const fn encloses_itself(expr: &Expr) -> bool {
+    match expr {
+        // NOT binds looser than any operator that can enclose it.
+        Expr::UnaryOp { op, .. } => !matches!(op, UnaryOperator::Not),
+        Expr::Exists { negated, .. } => !*negated,
+        // `x::T` prints its operand bare, and the operator's binding is dialect specific.
+        Expr::Cast { kind, .. } => !matches!(kind, CastKind::DoubleColon),
+        Expr::Identifier(_)
+        | Expr::CompoundIdentifier(_)
+        | Expr::CompoundFieldAccess { .. }
+        | Expr::Value(_)
+        | Expr::TypedString(_)
+        | Expr::Prefixed { .. }
+        | Expr::Nested(_)
+        | Expr::BinaryOp { .. }
+        | Expr::IsDistinctFrom(..)
+        | Expr::IsNotDistinctFrom(..)
+        | Expr::Function(_)
+        | Expr::Convert { .. }
+        | Expr::Extract { .. }
+        | Expr::Ceil { .. }
+        | Expr::Floor { .. }
+        | Expr::Position { .. }
+        | Expr::Substring { .. }
+        | Expr::Trim { .. }
+        | Expr::Overlay { .. }
+        | Expr::Case { .. }
+        | Expr::Subquery(_)
+        | Expr::Tuple(_)
+        | Expr::Array(_)
+        | Expr::MatchAgainst { .. }
+        | Expr::Wildcard(_)
+        | Expr::QualifiedWildcard(..) => true,
+        Expr::IsNull(_)
+        | Expr::IsNotNull(_)
+        | Expr::IsTrue(_)
+        | Expr::IsNotTrue(_)
+        | Expr::IsFalse(_)
+        | Expr::IsNotFalse(_)
+        | Expr::IsUnknown(_)
+        | Expr::IsNotUnknown(_)
+        | Expr::IsJson { .. }
+        | Expr::IsNormalized { .. }
+        | Expr::InList { .. }
+        | Expr::InSubquery { .. }
+        | Expr::InUnnest { .. }
+        | Expr::Between { .. }
+        | Expr::Like { .. }
+        | Expr::ILike { .. }
+        | Expr::SimilarTo { .. }
+        | Expr::RLike { .. }
+        | Expr::AnyOp { .. }
+        | Expr::AllOp { .. }
+        | Expr::MemberOf(_)
+        | Expr::AtTimeZone { .. }
+        | Expr::Collate { .. }
+        | Expr::Interval(_)
+        | Expr::JsonAccess { .. }
+        | Expr::GroupingSets(_)
+        | Expr::Cube(_)
+        | Expr::Rollup(_)
+        | Expr::Struct { .. }
+        | Expr::Named { .. }
+        | Expr::Dictionary(_)
+        | Expr::Map(_)
+        | Expr::Lambda(_)
+        | Expr::OuterJoin(_)
+        | Expr::Prior(_) => false,
+    }
 }
 
-/// How a dialect decides whether two spellings of a name are the same column.
+/// How a dialect decides whether two spellings name the same column or table.
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum Folding {
     /// An unquoted name folds to lower case, a quoted one keeps its spelling.
@@ -533,10 +601,11 @@ enum Folding {
 pub struct Canonicalizer<'a> {
     dialect: &'a dyn Dialect,
     folding: Folding,
+    qualifier_folding: Folding,
 }
 
 impl<'a> Canonicalizer<'a> {
-    /// Reads the folding rule for `dialect`.
+    /// Reads the folding rules for `dialect`.
     #[must_use]
     pub fn new(dialect: &'a dyn Dialect) -> Self {
         let folding = if dialect.is::<PostgreSqlDialect>() {
@@ -548,21 +617,29 @@ impl<'a> Canonicalizer<'a> {
         } else {
             Folding::Exact
         };
-        Self { dialect, folding }
+        // MySQL matches table and database names by case unless the server sets
+        // `lower_case_table_names`, so folding them could merge two tables.
+        let qualifier_folding = if dialect.is::<MySqlDialect>() {
+            Folding::Exact
+        } else {
+            folding
+        };
+        Self {
+            dialect,
+            folding,
+            qualifier_folding,
+        }
     }
 }
 
 /// Resolves an identifier to the name the database would see, then spells it the one way
 /// that reads back as that same name.
-fn identifier_text(
-    identifier: &Ident,
-    context: &Canonicalizer<'_>,
-) -> Result<String, CanonicalizeError> {
+fn identifier_text(identifier: &Ident, folding: Folding) -> Result<String, CanonicalizeError> {
     let quoted = identifier.quote_style.is_some();
     // Case folding rules are stated for ASCII. Anything else keeps its exact spelling,
     // because merging two names the database might separate is the unsafe direction.
     let folding = if identifier.value.is_ascii() {
-        context.folding
+        folding
     } else {
         Folding::Exact
     };

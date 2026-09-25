@@ -831,3 +831,58 @@ fn null_safe_comparisons_keep_predicate_operands_enclosed() {
         ],
     );
 }
+
+#[test]
+fn a_verbatim_predicate_as_operand_keeps_its_grouping() {
+    let postgres = [
+        ("z LIKE (x IS TRUE)", "z LIKE (x IS TRUE)"),
+        ("z LIKE x IS TRUE", "z LIKE x IS TRUE"),
+        ("z NOT ILIKE (x IS UNKNOWN)", "z NOT ILIKE (x IS UNKNOWN)"),
+        ("z NOT ILIKE x IS UNKNOWN", "z NOT ILIKE x IS UNKNOWN"),
+        ("z BETWEEN 1 AND (x IS TRUE)", "z BETWEEN 1 AND (x IS TRUE)"),
+        ("z BETWEEN 1 AND x IS TRUE", "z BETWEEN 1 AND x IS TRUE"),
+        ("z LIKE (x = ANY(y))", "z LIKE (x = ANY(y))"),
+        ("z LIKE (x SIMILAR TO 'y')", "z LIKE (x SIMILAR TO 'y')"),
+    ];
+    assert_canonical(&PostgreSqlDialect {}, &postgres);
+    let mysql = [
+        ("(x REGEXP 'y') IN (1)", "(x REGEXP 'y') IN (1)"),
+        ("x REGEXP 'y' IN (1)", "x REGEXP 'y' IN (1)"),
+        (
+            "(x RLIKE 'y') BETWEEN 1 AND 2",
+            "(x RLIKE 'y') BETWEEN 1 AND 2",
+        ),
+        ("x RLIKE 'y' BETWEEN 1 AND 2", "x RLIKE 'y' BETWEEN 1 AND 2"),
+        ("z LIKE (x MEMBER OF (y))", "z LIKE (x MEMBER OF(y))"),
+    ];
+    assert_canonical(&MySqlDialect {}, &mysql);
+}
+
+#[test]
+fn a_verbatim_predicate_as_operand_is_accepted() {
+    assert_canonical(
+        &PostgreSqlDialect {},
+        &[
+            ("- (x IS TRUE)", "- (x IS TRUE)"),
+            ("z BETWEEN (x IS TRUE) AND 2", "z BETWEEN (x IS TRUE) AND 2"),
+            ("(x IS NOT FALSE) != z", "((x IS NOT FALSE) != z)"),
+        ],
+    );
+    assert_canonical(
+        &MySqlDialect {},
+        &[("(x SIMILAR TO 'y') = z", "((x SIMILAR TO 'y') = z)")],
+    );
+}
+
+#[test]
+fn mysql_keeps_the_case_of_a_table_qualifier() {
+    assert_canonical(
+        &MySqlDialect {},
+        &[
+            ("T.a = 1", "(1 = T.a)"),
+            ("t.A = 1", "(1 = t.a)"),
+            ("`T`.a = 1", "(1 = `T`.a)"),
+        ],
+    );
+    assert_canonical(&PostgreSqlDialect {}, &[("T.A = 1", "(1 = t.a)")]);
+}
