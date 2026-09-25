@@ -368,14 +368,17 @@ fn normalize_expr_inner(
                     .unwrap_or_default()
             } else {
                 let operator = operator_text(op)?;
-                infix_text(left, operator, right, is_commutative(op), depth, context)?
+                let order = operand_order(op, context);
+                infix_text(left, operator, right, order, depth, context)?
             }
         }
         Expr::IsDistinctFrom(left, right) => {
-            infix_text(left, "IS DISTINCT FROM", right, true, depth, context)?
+            let order = OperandOrder::Sorted;
+            infix_text(left, "IS DISTINCT FROM", right, order, depth, context)?
         }
         Expr::IsNotDistinctFrom(left, right) => {
-            infix_text(left, "IS NOT DISTINCT FROM", right, true, depth, context)?
+            let order = OperandOrder::Sorted;
+            infix_text(left, "IS NOT DISTINCT FROM", right, order, depth, context)?
         }
         Expr::UnaryOp { op, expr } => format!(
             "{} {}",
@@ -798,22 +801,39 @@ fn normalize_expr_inner(
     })
 }
 
+/// How a binary operator treats the order of its operands.
+#[derive(Clone, Copy)]
+enum OperandOrder {
+    /// The written order is part of the meaning.
+    Written,
+    /// Either order is the same predicate or value.
+    Sorted,
+    /// Swapping the operands takes the mirrored operator, as `a < b` is `b > a`.
+    Mirrored(&'static str),
+}
+
 /// Spells `left operator right` in parentheses, so it reads back whole wherever it is nested,
-/// with the operands in sorted order when the operator is symmetric.
+/// with the operands in sorted order where `order` allows it.
 fn infix_text(
     left: &Expr,
-    operator: &str,
+    operator: &'static str,
     right: &Expr,
-    symmetric: bool,
+    order: OperandOrder,
     depth: usize,
     context: &Canonicalizer<'_>,
 ) -> Result<String, CanonicalizeError> {
     let left = normalize_expr_inner(left, depth + 1, true, context)?;
     let right = normalize_expr_inner(right, depth + 1, true, context)?;
-    let (left, right) = if symmetric && left > right {
-        (right, left)
-    } else {
-        (left, right)
+    let (left, operator, right) = match order {
+        OperandOrder::Sorted if left > right => (right, operator, left),
+        // Equal operands take whichever of the two operators sorts first, so `b > b` and
+        // `b < b` share one spelling.
+        OperandOrder::Mirrored(mirrored)
+            if left > right || (left == right && mirrored < operator) =>
+        {
+            (right, mirrored, left)
+        }
+        _ => (left, operator, right),
     };
     Ok(format!("({left} {operator} {right})"))
 }
@@ -1173,6 +1193,7 @@ fn field_access_text(
         Expr::Identifier(name) => {
             identifier_text(name, context.qualifier_folding, NamePlace::Operand, context)?
         }
+        Expr::Value(_) => return Err(literal_access()),
         root => normalize_expr_inner(root, depth + 1, true, context)?,
     };
     for access in access_chain {
@@ -1186,10 +1207,7 @@ fn field_access_text(
                     context,
                 )?);
             }
-            // sqlparser spaces a numeric field so it does not read as a decimal point.
-            AccessExpr::Dot(Expr::Value(value)) if matches!(value.value, Value::Number(..)) => {
-                text.push_str(&format!(" . {value}"));
-            }
+            AccessExpr::Dot(Expr::Value(_)) => return Err(literal_access()),
             AccessExpr::Dot(field) => {
                 text.push('.');
                 text.push_str(&normalize_expr_inner(field, depth + 1, true, context)?);
@@ -1231,6 +1249,12 @@ fn field_access_text(
         }
     }
     Ok(text)
+}
+
+/// The error for a field access on a literal or naming a field by one. Printed, `0 .l` reads
+/// `0.l`, which a tokenizer splits into the number `0.` and a name.
+fn literal_access() -> CanonicalizeError {
+    CanonicalizeError::Unsupported("A field access on a literal is not supported".to_string())
 }
 
 /// Reports whether `expr` is `TRUE`, however many parentheses enclose it.
@@ -1369,6 +1393,8 @@ pub struct Canonicalizer<'a> {
     qualifier_folding: Folding,
     /// Whether a bare `TRUE` is always the boolean, and never a column named `true`.
     true_is_reserved: bool,
+    /// Whether `+` only adds numbers, so `a + b` and `b + a` are one value.
+    plus_is_numeric: bool,
 }
 
 impl<'a> Canonicalizer<'a> {
@@ -1394,11 +1420,13 @@ impl<'a> Canonicalizer<'a> {
         let true_is_reserved = dialect.is::<PostgreSqlDialect>()
             || dialect.is::<MySqlDialect>()
             || dialect.is::<AnsiDialect>();
+        let plus_is_numeric = true_is_reserved || dialect.is::<SQLiteDialect>();
         Self {
             dialect,
             folding,
             qualifier_folding,
             true_is_reserved,
+            plus_is_numeric,
         }
     }
 }
@@ -1623,15 +1651,24 @@ fn collect_flat_children<'a>(expr: &'a Expr, operator: &BinaryOperator) -> Vec<&
     }
 }
 
-const fn is_commutative(operator: &BinaryOperator) -> bool {
-    matches!(
-        operator,
+/// Reads how `operator` treats the order of its operands under the canonicalizer's dialect.
+const fn operand_order(operator: &BinaryOperator, context: &Canonicalizer<'_>) -> OperandOrder {
+    match operator {
         BinaryOperator::And
-            | BinaryOperator::Or
-            | BinaryOperator::Eq
-            | BinaryOperator::NotEq
-            | BinaryOperator::Spaceship
-    )
+        | BinaryOperator::Or
+        | BinaryOperator::Eq
+        | BinaryOperator::NotEq
+        | BinaryOperator::Spaceship => OperandOrder::Sorted,
+        // SQL Server also concatenates strings with `+`, where the order matters.
+        BinaryOperator::Plus | BinaryOperator::Multiply if context.plus_is_numeric => {
+            OperandOrder::Sorted
+        }
+        BinaryOperator::Lt => OperandOrder::Mirrored(">"),
+        BinaryOperator::Gt => OperandOrder::Mirrored("<"),
+        BinaryOperator::LtEq => OperandOrder::Mirrored(">="),
+        BinaryOperator::GtEq => OperandOrder::Mirrored("<="),
+        _ => OperandOrder::Written,
+    }
 }
 
 fn operator_text(operator: &BinaryOperator) -> Result<&'static str, CanonicalizeError> {

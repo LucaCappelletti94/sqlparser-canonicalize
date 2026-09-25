@@ -15,10 +15,7 @@ fn test_normalize_simple() {
     let result = Canonicalizer::new(&dialect).normalize_sql(sql);
     assert!(result.is_ok());
 
-    let normalized = result.unwrap();
-    assert!(normalized.contains("age"));
-    assert!(normalized.contains(">"));
-    assert!(normalized.contains("18"));
+    assert_eq!(result.as_deref(), Ok("(18 < age)"));
 }
 
 #[test]
@@ -701,7 +698,7 @@ fn predicate_operands_keep_their_parentheses() {
         ("flag = (v IN (1, 2))", "((v IN (1, 2)) = flag)"),
         (
             "flag < (v IN (SELECT id FROM u))",
-            "(flag < (v IN (SELECT id FROM u)))",
+            "((v IN (SELECT id FROM u)) > flag)",
         ),
         (
             "flag = (v NOT BETWEEN 1 AND 2)",
@@ -1050,16 +1047,16 @@ fn function_calls_fold_their_name_and_normalize_their_arguments() {
     assert_canonical(
         &PostgreSqlDialect {},
         &[
-            ("COALESCE(A, 1) > 0", "(coalesce(a, 1) > 0)"),
-            ("coalesce((a), 1) > 0", "(coalesce(a, 1) > 0)"),
+            ("COALESCE(A, 1) > 0", "(0 < coalesce(a, 1))"),
+            ("coalesce((a), 1) > 0", "(0 < coalesce(a, 1))"),
             ("LOWER(Name) = 'x'", "('x' = lower(name))"),
             ("\"Lower\"(name) = 'x'", "(\"Lower\"(name) = 'x')"),
             (
                 "Pg_Catalog.Lower(name) = 'x'",
                 "('x' = pg_catalog.lower(name))",
             ),
-            ("NOW() > d", "(now() > d)"),
-            ("d < CURRENT_TIMESTAMP", "(d < current_timestamp)"),
+            ("NOW() > d", "(d < now())"),
+            ("d < CURRENT_TIMESTAMP", "(current_timestamp > d)"),
             ("f(A = 1, (b))", "f((1 = a), b)"),
         ],
     );
@@ -1092,7 +1089,7 @@ fn casts_share_one_spelling() {
             ("CAST(A AS INT) = 1", "(1 = CAST(a AS INT))"),
             ("A::INT = 1", "(1 = CAST(a AS INT))"),
             ("(a)::INT = 1", "(1 = CAST(a AS INT))"),
-            ("cast((a + 1) as int) = 1", "(1 = CAST((a + 1) AS INT))"),
+            ("cast((a + 1) as int) = 1", "(1 = CAST((1 + a) AS INT))"),
         ],
     );
     assert_canonical(
@@ -1168,10 +1165,10 @@ fn tuples_arrays_and_typed_literals_normalize_their_elements() {
         &[
             ("(A, (b)) = (1, 2)", "((1, 2) = (a, b))"),
             ("ARRAY[A, 1] = x", "(ARRAY[a, 1] = x)"),
-            ("D > DATE '2020-01-01'", "(d > DATE '2020-01-01')"),
+            ("D > DATE '2020-01-01'", "(DATE '2020-01-01' < d)"),
             (
                 "D < NOW() - INTERVAL '1' DAY",
-                "(d < (now() - (INTERVAL '1' DAY)))",
+                "((now() - (INTERVAL '1' DAY)) > d)",
             ),
         ],
     );
@@ -1198,7 +1195,7 @@ fn a_call_keeps_its_arguments_apart_from_special_syntax() {
         &AnsiDialect {},
         &[(
             "POSITION(TRUE >= a IN ((2), 2)) = 1",
-            "(1 = POSITION(((true >= A) IN (2, 2))))",
+            "(1 = POSITION(((A <= true) IN (2, 2))))",
         )],
     );
     assert_canonical(
@@ -1296,16 +1293,16 @@ fn postgres_value_forms_keep_their_qualifiers() {
             ),
             (
                 "D < INTERVAL '1' DAY TO HOUR",
-                "(d < (INTERVAL '1' DAY TO HOUR))",
+                "((INTERVAL '1' DAY TO HOUR) > d)",
             ),
-            ("D < INTERVAL '1' DAY (2)", "(d < (INTERVAL '1' DAY (2)))"),
+            ("D < INTERVAL '1' DAY (2)", "((INTERVAL '1' DAY (2)) > d)"),
             (
                 "D < INTERVAL '1' SECOND (2, 3)",
-                "(d < (INTERVAL '1' SECOND (2, 3)))",
+                "((INTERVAL '1' SECOND (2, 3)) > d)",
             ),
             (
                 "D < INTERVAL '1' HOUR TO SECOND (3)",
-                "(d < (INTERVAL '1' HOUR TO SECOND (3)))",
+                "((INTERVAL '1' HOUR TO SECOND (3)) > d)",
             ),
             ("A[1:2] = B", "(a[1:2] = b)"),
             ("A[:(2)] = B", "(a[:2] = b)"),
@@ -1491,4 +1488,53 @@ fn a_missing_filter_is_one_equals_one_where_true_may_name_a_column() {
             Ok("x IN (SELECT id FROM u WHERE true)")
         );
     }
+}
+
+#[test]
+fn mirrored_comparisons_share_a_key() {
+    let cases = [
+        ("age > 18", "(18 < age)"),
+        ("18 < age", "(18 < age)"),
+        ("age >= 18", "(18 <= age)"),
+        ("18 <= age", "(18 <= age)"),
+        ("a < b", "(a < b)"),
+        ("b > a", "(a < b)"),
+        ("B >= A", "(a <= b)"),
+        ("b > b", "(b < b)"),
+        ("b >= (b)", "(b <= b)"),
+    ];
+    assert_canonical(&PostgreSqlDialect {}, &cases);
+    // `a > b` and `b < a` agree even when either side is NULL, so every dialect mirrors.
+    assert_canonical(&GenericDialect {}, &[("b > a", "(a < b)")]);
+}
+
+#[test]
+fn sums_and_products_order_their_operands_where_plus_is_numeric() {
+    let cases = [
+        ("b + a = 1", "((a + b) = 1)"),
+        ("a + b = 1", "((a + b) = 1)"),
+        ("b * a = 1", "((a * b) = 1)"),
+        ("b - a = 1", "((b - a) = 1)"),
+        ("(c + b) + a = 1", "(((b + c) + a) = 1)"),
+    ];
+    for dialect in [
+        &PostgreSqlDialect {} as &dyn Dialect,
+        &MySqlDialect {},
+        &SQLiteDialect {},
+    ] {
+        assert_canonical(dialect, &cases);
+    }
+    assert_canonical(&AnsiDialect {}, &[("b + a = 1", "((A + B) = 1)")]);
+    // SQL Server also concatenates strings with `+`, so dialects without a numeric `+` keep
+    // the written order.
+    assert_canonical(&GenericDialect {}, &[("b + a = 1", "((b + a) = 1)")]);
+}
+
+#[test]
+fn field_access_on_a_literal_is_refused() {
+    // `0 .l` prints as `0.l`, which a tokenizer reads as the number `0.` and a name.
+    assert_unsupported(
+        &MySqlDialect {},
+        &["0 .l = 1", "0 .l.0. = 1", "a.l.0. = 1", "'x'.f = 1"],
+    );
 }

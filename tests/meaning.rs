@@ -184,6 +184,11 @@ struct Spelling {
     /// Spells a missing subquery filter as `WHERE TRUE` at times, which is the same filter only
     /// where `TRUE` is reserved.
     true_filter_synonym: bool,
+    /// Writes `b > a` for `a < b` at times, which every dialect reads as one comparison.
+    mirror_comparisons: bool,
+    /// Swaps the operands of `+` and `*` at times, which is the same value only where `+` is
+    /// numeric.
+    swap_numeric_operands: bool,
 }
 
 fn keyword(text: &str, spelling: Spelling, rng: &mut Rng) -> String {
@@ -221,10 +226,26 @@ fn spell(tree: &Tree, spelling: Spelling, rng: &mut Rng) -> String {
         }
         Tree::Binary(operator, left, right) => {
             let (mut first, mut second) = (left, right);
-            if spelling.swap_symmetric_operands && SYMMETRIC.contains(operator) && rng.percent(50) {
+            let mut operator = *operator;
+            let swappable = SYMMETRIC.contains(&operator)
+                || (spelling.swap_numeric_operands && matches!(operator, "+" | "*"));
+            if (spelling.swap_symmetric_operands && swappable) && rng.percent(50) {
                 (first, second) = (second, first);
             }
-            let operator = if *operator == "!=" && spelling.flip_keyword_case && rng.percent(50) {
+            let mirrored = match operator {
+                "<" => Some(">"),
+                ">" => Some("<"),
+                "<=" => Some(">="),
+                ">=" => Some("<="),
+                _ => None,
+            };
+            if let Some(mirrored) =
+                mirrored.filter(|_| spelling.mirror_comparisons && rng.percent(50))
+            {
+                operator = mirrored;
+                (first, second) = (second, first);
+            }
+            let operator = if operator == "!=" && spelling.flip_keyword_case && rng.percent(50) {
                 "<>".to_string()
             } else {
                 keyword(operator, spelling, rng)
@@ -442,6 +463,8 @@ fn equivalent_spellings_agree() {
             double_colon_cast: dialect.is::<PostgreSqlDialect>(),
             flip_table_case: !dialect.is::<MySqlDialect>() && !dialect.is::<GenericDialect>(),
             true_filter_synonym: Folding::of(dialect).true_is_reserved,
+            mirror_comparisons: true,
+            swap_numeric_operands: Folding::of(dialect).plus_is_numeric,
         };
         for seed in 0..SEEDS {
             let mut rng = Rng::new(seed);
