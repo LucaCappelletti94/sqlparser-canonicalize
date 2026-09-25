@@ -57,12 +57,12 @@ enum Tree {
     Substring(Box<Tree>, Box<Tree>, Box<Tree>),
     Position(Box<Tree>, Box<Tree>),
     Tuple(Box<Tree>, Box<Tree>),
-    /// Subject, filter and negation of `x [NOT] IN (SELECT a FROM u WHERE filter)`.
-    InQuery(Box<Tree>, Box<Tree>, bool),
-    /// Filter and negation of `[NOT] EXISTS (SELECT * FROM u WHERE filter)`.
-    Exists(Box<Tree>, bool),
-    /// Filter of the scalar subquery `(SELECT b FROM u WHERE filter)`.
-    Scalar(Box<Tree>),
+    /// Subject, filter and negation of `x [NOT] IN (SELECT a FROM u [WHERE filter])`.
+    InQuery(Box<Tree>, Option<Box<Tree>>, bool),
+    /// Filter and negation of `[NOT] EXISTS (SELECT * FROM u [WHERE filter])`.
+    Exists(Option<Box<Tree>>, bool),
+    /// Filter of the scalar subquery `(SELECT b FROM u [WHERE filter])`.
+    Scalar(Option<Box<Tree>>),
 }
 
 const BINARY: &[&str] = &[
@@ -159,9 +159,12 @@ fn tree(rng: &mut Rng, depth: u32, quoted: &'static str) -> Tree {
         17 => Tree::Substring(child(rng), child(rng), child(rng)),
         18 => Tree::Position(child(rng), child(rng)),
         19 => Tree::Tuple(child(rng), child(rng)),
-        20 => Tree::InQuery(child(rng), child(rng), rng.percent(50)),
-        21 => Tree::Exists(child(rng), rng.percent(50)),
-        _ => Tree::Scalar(child(rng)),
+        20 => {
+            let filter = rng.percent(70).then(|| child(rng));
+            Tree::InQuery(child(rng), filter, rng.percent(50))
+        }
+        21 => Tree::Exists(rng.percent(70).then(|| child(rng)), rng.percent(50)),
+        _ => Tree::Scalar(rng.percent(70).then(|| child(rng))),
     }
 }
 
@@ -178,6 +181,9 @@ struct Spelling {
     /// Flips the case of the subquery table's name, which only dialects that fold table names
     /// treat as the same table.
     flip_table_case: bool,
+    /// Spells a missing subquery filter as `WHERE TRUE` at times, which is the same filter only
+    /// where `TRUE` is reserved.
+    true_filter_synonym: bool,
 }
 
 fn keyword(text: &str, spelling: Spelling, rng: &mut Rng) -> String {
@@ -332,19 +338,22 @@ fn spell(tree: &Tree, spelling: Spelling, rng: &mut Rng) -> String {
             let subject = operand(subject, rng);
             let not = if *negated { "NOT " } else { "" };
             let not = keyword(not, spelling, rng);
-            let query = subquery("a", filter, spelling, rng);
+            let query = subquery("a", filter.as_deref(), spelling, rng);
             format!("{subject} {not}IN ({query})")
         }
         Tree::Exists(filter, negated) => {
             let not = if *negated { "NOT " } else { "" };
             let exists = keyword(&format!("{not}EXISTS"), spelling, rng);
-            format!("{exists} ({})", subquery("*", filter, spelling, rng))
+            format!(
+                "{exists} ({})",
+                subquery("*", filter.as_deref(), spelling, rng)
+            )
         }
-        Tree::Scalar(filter) => format!("({})", subquery("b", filter, spelling, rng)),
+        Tree::Scalar(filter) => format!("({})", subquery("b", filter.as_deref(), spelling, rng)),
     }
 }
 
-fn subquery(projection: &str, filter: &Tree, spelling: Spelling, rng: &mut Rng) -> String {
+fn subquery(projection: &str, filter: Option<&Tree>, spelling: Spelling, rng: &mut Rng) -> String {
     let table = if spelling.flip_table_case && rng.percent(50) {
         "U"
     } else {
@@ -355,8 +364,15 @@ fn subquery(projection: &str, filter: &Tree, spelling: Spelling, rng: &mut Rng) 
         keyword("FROM", spelling, rng),
         keyword("WHERE", spelling, rng),
     );
-    let filter = spell(filter, spelling, rng);
-    format!("{select} {projection} {from} {table} {filter_keyword} {filter}")
+    // A missing filter and `WHERE TRUE` keep the same rows where `TRUE` is reserved.
+    let filter = match filter {
+        Some(filter) => format!(" {filter_keyword} {}", spell(filter, spelling, rng)),
+        None if spelling.true_filter_synonym && rng.percent(50) => {
+            format!(" {filter_keyword} {}", keyword("TRUE", spelling, rng))
+        }
+        None => String::new(),
+    };
+    format!("{select} {projection} {from} {table}{filter}")
 }
 
 fn parse(dialect: &dyn Dialect, predicate: &str) -> Option<Expr> {
@@ -425,6 +441,7 @@ fn equivalent_spellings_agree() {
             swap_symmetric_operands: true,
             double_colon_cast: dialect.is::<PostgreSqlDialect>(),
             flip_table_case: !dialect.is::<MySqlDialect>() && !dialect.is::<GenericDialect>(),
+            true_filter_synonym: Folding::of(dialect).true_is_reserved,
         };
         for seed in 0..SEEDS {
             let mut rng = Rng::new(seed);

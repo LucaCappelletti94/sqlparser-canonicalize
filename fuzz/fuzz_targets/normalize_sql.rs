@@ -12,11 +12,7 @@ fn exercise(sql: &str, dialect: &dyn Dialect) {
     };
     let hash = hash_canonical(&canonical);
     assert_eq!(hash_canonical(&canonical), hash);
-    let replay = if canonical == "TRUE" {
-        "SELECT * FROM t".to_string()
-    } else {
-        format!("SELECT * FROM t WHERE {canonical}")
-    };
+    let replay = format!("SELECT * FROM t WHERE {canonical}");
     // Canonical text can outgrow the statement entry's own input limit, so the replay is
     // asserted only where that entry accepts it.
     if let Ok(again) = Canonicalizer::new(dialect).normalize_sql(&replay) {

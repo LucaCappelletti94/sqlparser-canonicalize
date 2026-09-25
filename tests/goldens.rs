@@ -22,8 +22,8 @@ const GOLDENS: &[Golden] = &[
     Golden {
         dialect: DialectKind::PostgreSql,
         sql: "SELECT * FROM t",
-        normalized: "TRUE",
-        hash: 121277097519756504974338435796877478995,
+        normalized: "true",
+        hash: 196429622312853751706263382814465376604,
     },
     Golden {
         dialect: DialectKind::PostgreSql,
@@ -250,8 +250,8 @@ const GOLDENS: &[Golden] = &[
     Golden {
         dialect: DialectKind::PostgreSql,
         sql: "SELECT COUNT(*) FROM t",
-        normalized: "TRUE",
-        hash: 121277097519756504974338435796877478995,
+        normalized: "true",
+        hash: 196429622312853751706263382814465376604,
     },
     Golden {
         dialect: DialectKind::PostgreSql,
@@ -268,8 +268,8 @@ const GOLDENS: &[Golden] = &[
     Golden {
         dialect: DialectKind::PostgreSql,
         sql: "SELECT region, SUM(amount) FROM orders GROUP BY region HAVING SUM(amount) > 10",
-        normalized: "TRUE",
-        hash: 121277097519756504974338435796877478995,
+        normalized: "true",
+        hash: 196429622312853751706263382814465376604,
     },
     Golden {
         dialect: DialectKind::PostgreSql,
@@ -292,8 +292,8 @@ const GOLDENS: &[Golden] = &[
     Golden {
         dialect: DialectKind::MySql,
         sql: "SELECT * FROM t",
-        normalized: "TRUE",
-        hash: 121277097519756504974338435796877478995,
+        normalized: "true",
+        hash: 196429622312853751706263382814465376604,
     },
     Golden {
         dialect: DialectKind::MySql,
@@ -514,8 +514,8 @@ const GOLDENS: &[Golden] = &[
     Golden {
         dialect: DialectKind::MySql,
         sql: "SELECT COUNT(*) FROM t",
-        normalized: "TRUE",
-        hash: 121277097519756504974338435796877478995,
+        normalized: "true",
+        hash: 196429622312853751706263382814465376604,
     },
     Golden {
         dialect: DialectKind::MySql,
@@ -532,8 +532,8 @@ const GOLDENS: &[Golden] = &[
     Golden {
         dialect: DialectKind::MySql,
         sql: "SELECT region, SUM(amount) FROM orders GROUP BY region HAVING SUM(amount) > 10",
-        normalized: "TRUE",
-        hash: 121277097519756504974338435796877478995,
+        normalized: "true",
+        hash: 196429622312853751706263382814465376604,
     },
     Golden {
         dialect: DialectKind::MySql,
@@ -556,8 +556,8 @@ const GOLDENS: &[Golden] = &[
     Golden {
         dialect: DialectKind::SQLite,
         sql: "SELECT * FROM t",
-        normalized: "TRUE",
-        hash: 121277097519756504974338435796877478995,
+        normalized: "(1 = 1)",
+        hash: 29413222210268323713216642985668275023,
     },
     Golden {
         dialect: DialectKind::SQLite,
@@ -784,8 +784,8 @@ const GOLDENS: &[Golden] = &[
     Golden {
         dialect: DialectKind::SQLite,
         sql: "SELECT COUNT(*) FROM t",
-        normalized: "TRUE",
-        hash: 121277097519756504974338435796877478995,
+        normalized: "(1 = 1)",
+        hash: 29413222210268323713216642985668275023,
     },
     Golden {
         dialect: DialectKind::SQLite,
@@ -802,8 +802,8 @@ const GOLDENS: &[Golden] = &[
     Golden {
         dialect: DialectKind::SQLite,
         sql: "SELECT region, SUM(amount) FROM orders GROUP BY region HAVING SUM(amount) > 10",
-        normalized: "TRUE",
-        hash: 121277097519756504974338435796877478995,
+        normalized: "(1 = 1)",
+        hash: 29413222210268323713216642985668275023,
     },
     Golden {
         dialect: DialectKind::SQLite,
@@ -952,11 +952,7 @@ fn distinct_golden_text_has_distinct_hashes() {
 #[test]
 fn golden_canonical_forms_are_idempotent() {
     for golden in GOLDENS {
-        let sql = if golden.normalized == "TRUE" {
-            "SELECT * FROM t".to_string()
-        } else {
-            format!("SELECT * FROM t WHERE {}", golden.normalized)
-        };
+        let sql = format!("SELECT * FROM t WHERE {}", golden.normalized);
         let second = normalize_with_dialect(&sql, golden.dialect);
         assert_eq!(second, golden.normalized, "SQL: {}", golden.sql);
     }

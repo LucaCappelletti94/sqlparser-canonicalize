@@ -72,11 +72,7 @@ fuzz_target!(|data: &[u8]| {
         canonical,
     );
     // The statement entry has envelope limits the clause entry lacks, so assert where it accepts.
-    let replay = if canonical == "TRUE" {
-        "SELECT * FROM t".to_string()
-    } else {
-        format!("SELECT * FROM t WHERE {canonical}")
-    };
+    let replay = format!("SELECT * FROM t WHERE {canonical}");
     if let Ok(again) = Canonicalizer::new(verify_dialect).normalize_sql(&replay) {
         assert_eq!(
             again, canonical,

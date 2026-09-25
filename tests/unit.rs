@@ -113,7 +113,7 @@ fn test_normalize_no_where() {
     assert!(result.is_ok());
 
     let normalized = result.unwrap();
-    assert_eq!(normalized, "TRUE");
+    assert_eq!(normalized, "true");
 }
 
 #[test]
@@ -208,7 +208,7 @@ fn test_normalize_no_where_clause() {
     let sql = "SELECT * FROM t";
     let result = Canonicalizer::new(&dialect).normalize_sql(sql).unwrap();
 
-    assert_eq!(result, "TRUE");
+    assert_eq!(result, "true");
 }
 
 #[test]
@@ -1436,6 +1436,59 @@ fn a_caller_built_form_no_predicate_holds_is_refused() {
                 Err(CanonicalizeError::Unsupported(_))
             ),
             "{expr:?}"
+        );
+    }
+}
+
+#[test]
+fn a_missing_filter_is_the_filter_true_where_true_is_reserved() {
+    for dialect in [
+        &PostgreSqlDialect {} as &dyn Dialect,
+        &MySqlDialect {},
+        &AnsiDialect {},
+    ] {
+        let canonicalizer = Canonicalizer::new(dialect);
+        for sql in [
+            "SELECT * FROM t",
+            "SELECT * FROM t WHERE TRUE",
+            "SELECT * FROM t WHERE (true)",
+        ] {
+            assert_eq!(
+                canonicalizer.normalize_sql(sql).as_deref(),
+                Ok("true"),
+                "{dialect:?} {sql}"
+            );
+        }
+        assert_eq!(
+            canonicalizer.normalize_where_clause(None).as_deref(),
+            Ok("true")
+        );
+    }
+}
+
+#[test]
+fn a_missing_filter_is_one_equals_one_where_true_may_name_a_column() {
+    // SQLite reads a bare `TRUE` as a column named `true` when the table has one.
+    for dialect in [&SQLiteDialect {} as &dyn Dialect, &GenericDialect {}] {
+        let canonicalizer = Canonicalizer::new(dialect);
+        for sql in ["SELECT * FROM t", "SELECT * FROM t WHERE 1 = 1"] {
+            assert_eq!(
+                canonicalizer.normalize_sql(sql).as_deref(),
+                Ok("(1 = 1)"),
+                "{dialect:?} {sql}"
+            );
+        }
+        assert_eq!(
+            canonicalizer
+                .normalize_sql("SELECT * FROM t WHERE TRUE")
+                .as_deref(),
+            Ok("true")
+        );
+        assert_eq!(
+            canonicalizer
+                .normalize_sql("SELECT * FROM t WHERE x IN (SELECT id FROM u WHERE TRUE)")
+                .as_deref(),
+            Ok("x IN (SELECT id FROM u WHERE true)")
         );
     }
 }

@@ -4,7 +4,7 @@
 //! the canonicalizer promises: redundant parentheses, the dialect's name folding, the order of
 //! operands and items it treats as unordered, and synonyms such as `SOME` for `ANY`, `x::T` for
 //! `CAST(x AS T)`, a missing `ELSE` for `ELSE NULL`, and a subquery without `WHERE` for one
-//! filtered by `TRUE`.
+//! filtered by `TRUE` where `TRUE` is reserved.
 //! Anything else keeps its structure.
 
 use sqlparser::ast::{
@@ -22,11 +22,13 @@ pub enum Fold {
     Exact,
 }
 
-/// How a dialect folds column names and table qualifiers.
+/// How a dialect folds column names and table qualifiers, and whether a bare `TRUE` is always
+/// the boolean.
 #[derive(Clone, Copy, Debug)]
 pub struct Folding {
     pub column: Fold,
     pub qualifier: Fold,
+    pub true_is_reserved: bool,
 }
 
 impl Folding {
@@ -42,7 +44,15 @@ impl Folding {
         } else {
             (Fold::Exact, Fold::Exact)
         };
-        Self { column, qualifier }
+        // SQLite reads a bare `TRUE` as a column named `true` when the table has one.
+        let true_is_reserved = dialect.is::<PostgreSqlDialect>()
+            || dialect.is::<MySqlDialect>()
+            || dialect.is::<AnsiDialect>();
+        Self {
+            column,
+            qualifier,
+            true_is_reserved,
+        }
     }
 }
 
@@ -522,7 +532,7 @@ fn query_meaning(query: &Query, folding: Folding) -> String {
     let filter = select
         .selection
         .as_ref()
-        .filter(|filter| !is_true(filter))
+        .filter(|filter| !(folding.true_is_reserved && is_true(filter)))
         .map(|filter| meaning(filter, folding));
     format!(
         "(select [{}] {} {filter:?})",
