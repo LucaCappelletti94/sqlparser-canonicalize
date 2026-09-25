@@ -1574,3 +1574,22 @@ fn equality_between_two_columns_keeps_its_order_where_the_left_collation_wins() 
     }
     assert_canonical(&PostgreSqlDialect {}, &[("b = a", "(a = b)")]);
 }
+
+#[test]
+fn a_boolean_is_no_literal_where_true_may_name_a_column() {
+    // SQLite reads `TRUE` as a column named `true` when the table has one, and that column
+    // brings its collation to the comparison.
+    assert_canonical(
+        &SQLiteDialect {},
+        &[
+            ("TRUE < b", "(true < b)"),
+            ("b > TRUE", "(b > true)"),
+            ("+TRUE < b", "(+ true < b)"),
+            ("b = FALSE", "(b = false)"),
+        ],
+    );
+    assert_canonical(
+        &PostgreSqlDialect {},
+        &[("TRUE < b", "(b > true)"), ("b > TRUE", "(b > true)")],
+    );
+}

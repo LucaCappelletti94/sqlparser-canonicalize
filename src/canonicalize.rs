@@ -827,7 +827,8 @@ fn infix_text(
 ) -> Result<String, CanonicalizeError> {
     // Where the left operand's collation wins, as in SQLite, two operands may only swap when
     // one of them is a literal, which has no collation of its own.
-    let swappable = context.collation_is_symmetric || is_literal(left) || is_literal(right);
+    let swappable =
+        context.collation_is_symmetric || is_literal(left, context) || is_literal(right, context);
     let left = normalize_expr_inner(left, depth + 1, true, context)?;
     let right = normalize_expr_inner(right, depth + 1, true, context)?;
     let (left, operator, right) = match order {
@@ -1265,14 +1266,17 @@ fn literal_access() -> CanonicalizeError {
 }
 
 /// Reports whether `expr` is a literal, signed or not, however many parentheses enclose it.
-fn is_literal(expr: &Expr) -> bool {
+///
+/// A boolean counts only where `TRUE` is reserved, because SQLite reads `TRUE` and `FALSE` as
+/// columns of those names when the table has them.
+fn is_literal(expr: &Expr, context: &Canonicalizer<'_>) -> bool {
     match expr {
-        Expr::Nested(inner) => is_literal(inner),
+        Expr::Nested(inner) => is_literal(inner, context),
         Expr::UnaryOp {
             op: UnaryOperator::Minus | UnaryOperator::Plus,
             expr,
-        } => is_literal(expr),
-        Expr::Value(_) => true,
+        } => is_literal(expr, context),
+        Expr::Value(value) => context.true_is_reserved || !matches!(value.value, Value::Boolean(_)),
         _ => false,
     }
 }

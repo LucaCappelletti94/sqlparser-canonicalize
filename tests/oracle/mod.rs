@@ -584,18 +584,19 @@ fn is_true(expr: &Expr) -> bool {
 /// operand's collation wins and neither side is a literal.
 fn swappable(left: &Expr, right: &Expr, folding: Folding) -> bool {
     folding.collation_is_symmetric
-        || literal(left)
-        || literal(right)
+        || literal(left, folding)
+        || literal(right, folding)
         || meaning(left, folding) == meaning(right, folding)
 }
 
-fn literal(expr: &Expr) -> bool {
+/// A boolean is a literal only where `TRUE` is reserved, as SQLite may read it as a column.
+fn literal(expr: &Expr, folding: Folding) -> bool {
     match strip_nested(expr) {
         Expr::UnaryOp {
             op: UnaryOperator::Minus | UnaryOperator::Plus,
             expr,
-        } => literal(expr),
-        Expr::Value(_) => true,
+        } => literal(expr, folding),
+        Expr::Value(value) => folding.true_is_reserved || !matches!(value.value, Value::Boolean(_)),
         _ => false,
     }
 }
