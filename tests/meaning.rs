@@ -181,6 +181,9 @@ struct Spelling {
     /// Flips the case of the subquery table's name, which only dialects that fold table names
     /// treat as the same table.
     flip_table_case: bool,
+    /// Spells a missing subquery filter as `WHERE TRUE` at times, which is the same filter only
+    /// where `TRUE` is reserved.
+    true_filter_synonym: bool,
 }
 
 fn keyword(text: &str, spelling: Spelling, rng: &mut Rng) -> String {
@@ -361,10 +364,10 @@ fn subquery(projection: &str, filter: Option<&Tree>, spelling: Spelling, rng: &m
         keyword("FROM", spelling, rng),
         keyword("WHERE", spelling, rng),
     );
-    // A missing filter and `WHERE TRUE` keep the same rows.
+    // A missing filter and `WHERE TRUE` keep the same rows where `TRUE` is reserved.
     let filter = match filter {
         Some(filter) => format!(" {filter_keyword} {}", spell(filter, spelling, rng)),
-        None if spelling.flip_keyword_case && rng.percent(50) => {
+        None if spelling.true_filter_synonym && rng.percent(50) => {
             format!(" {filter_keyword} {}", keyword("TRUE", spelling, rng))
         }
         None => String::new(),
@@ -438,6 +441,7 @@ fn equivalent_spellings_agree() {
             swap_symmetric_operands: true,
             double_colon_cast: dialect.is::<PostgreSqlDialect>(),
             flip_table_case: !dialect.is::<MySqlDialect>() && !dialect.is::<GenericDialect>(),
+            true_filter_synonym: Folding::of(dialect).true_is_reserved,
         };
         for seed in 0..SEEDS {
             let mut rng = Rng::new(seed);

@@ -556,8 +556,8 @@ const GOLDENS: &[Golden] = &[
     Golden {
         dialect: DialectKind::SQLite,
         sql: "SELECT * FROM t",
-        normalized: "true",
-        hash: 196429622312853751706263382814465376604,
+        normalized: "(1 = 1)",
+        hash: 29413222210268323713216642985668275023,
     },
     Golden {
         dialect: DialectKind::SQLite,
@@ -784,8 +784,8 @@ const GOLDENS: &[Golden] = &[
     Golden {
         dialect: DialectKind::SQLite,
         sql: "SELECT COUNT(*) FROM t",
-        normalized: "true",
-        hash: 196429622312853751706263382814465376604,
+        normalized: "(1 = 1)",
+        hash: 29413222210268323713216642985668275023,
     },
     Golden {
         dialect: DialectKind::SQLite,
@@ -802,8 +802,8 @@ const GOLDENS: &[Golden] = &[
     Golden {
         dialect: DialectKind::SQLite,
         sql: "SELECT region, SUM(amount) FROM orders GROUP BY region HAVING SUM(amount) > 10",
-        normalized: "true",
-        hash: 196429622312853751706263382814465376604,
+        normalized: "(1 = 1)",
+        hash: 29413222210268323713216642985668275023,
     },
     Golden {
         dialect: DialectKind::SQLite,

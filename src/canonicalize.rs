@@ -1,3 +1,4 @@
+use alloc::boxed::Box;
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec;
@@ -71,10 +72,24 @@ fn normalize_where_clause_inner(
 ) -> Result<String, CanonicalizeError> {
     match where_expr {
         Some(expr) => normalize_expr_inner(expr, 0, false, context),
-        // A missing filter keeps every row, as `WHERE TRUE` does, so it is spelled as that
-        // filter.
+        // A missing filter keeps every row. Where `TRUE` is reserved it is spelled as
+        // `WHERE TRUE`. Elsewhere a bare `TRUE` may name a column, as in SQLite, so it is spelled
+        // as `WHERE 1 = 1`, which keeps every row in every dialect.
         None => {
-            let every_row = Expr::Value(Value::Boolean(true).with_empty_span());
+            let every_row = if context.true_is_reserved {
+                Expr::Value(Value::Boolean(true).with_empty_span())
+            } else {
+                let one = || {
+                    Box::new(Expr::Value(
+                        Value::Number("1".into(), false).with_empty_span(),
+                    ))
+                };
+                Expr::BinaryOp {
+                    left: one(),
+                    op: BinaryOperator::Eq,
+                    right: one(),
+                }
+            };
             normalize_expr_inner(&every_row, 0, false, context)
         }
     }
@@ -1005,8 +1020,12 @@ fn subquery_text(
         .collect::<Result<Vec<_>, _>>()?
         .join(".");
     let mut text = format!("SELECT {items} FROM {table}");
-    // `WHERE TRUE` keeps every row, as a missing `WHERE` does.
-    if let Some(filter) = select.selection.as_ref().filter(|filter| !is_true(filter)) {
+    // `WHERE TRUE` keeps every row, as a missing `WHERE` does, where `TRUE` is reserved.
+    if let Some(filter) = select
+        .selection
+        .as_ref()
+        .filter(|filter| !(context.true_is_reserved && is_true(filter)))
+    {
         text.push_str(" WHERE ");
         text.push_str(&normalize_expr_inner(filter, depth + 1, false, context)?);
     }
@@ -1348,6 +1367,8 @@ pub struct Canonicalizer<'a> {
     dialect: &'a dyn Dialect,
     folding: Folding,
     qualifier_folding: Folding,
+    /// Whether a bare `TRUE` is always the boolean, and never a column named `true`.
+    true_is_reserved: bool,
 }
 
 impl<'a> Canonicalizer<'a> {
@@ -1370,10 +1391,14 @@ impl<'a> Canonicalizer<'a> {
         } else {
             folding
         };
+        let true_is_reserved = dialect.is::<PostgreSqlDialect>()
+            || dialect.is::<MySqlDialect>()
+            || dialect.is::<AnsiDialect>();
         Self {
             dialect,
             folding,
             qualifier_folding,
+            true_is_reserved,
         }
     }
 }
