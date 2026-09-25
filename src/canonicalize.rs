@@ -1678,9 +1678,10 @@ fn collect_flat_children<'a>(expr: &'a Expr, operator: &BinaryOperator) -> Vec<&
 }
 
 /// Reads how `operator` treats the order of its operands under the canonicalizer's dialect.
+///
+/// `AND` and `OR` never reach here, because their chains are flattened and sorted whole.
 const fn operand_order(operator: &BinaryOperator, context: &Canonicalizer<'_>) -> OperandOrder {
     match operator {
-        BinaryOperator::And | BinaryOperator::Or => OperandOrder::Sorted,
         BinaryOperator::Eq | BinaryOperator::NotEq | BinaryOperator::Spaceship => {
             OperandOrder::Compared
         }
