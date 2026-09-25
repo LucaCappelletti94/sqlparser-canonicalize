@@ -1358,6 +1358,68 @@ fn subqueries_normalize_their_projection_table_and_filter() {
 }
 
 #[test]
+fn a_subquery_table_alias_is_kept_folded_as_a_qualifier() {
+    assert_canonical(
+        &PostgreSqlDialect {},
+        &[
+            (
+                "EXISTS (SELECT 1 FROM shares s WHERE s.doc_id = docs.id)",
+                "EXISTS (SELECT 1 FROM shares s WHERE (docs.id = s.doc_id))",
+            ),
+            (
+                "EXISTS (SELECT 1 FROM Shares AS S WHERE S.doc_id = docs.id)",
+                "EXISTS (SELECT 1 FROM shares s WHERE (docs.id = s.doc_id))",
+            ),
+            (
+                "x IN (SELECT a FROM u AS \"v\" WHERE \"v\".a = 1)",
+                "x IN (SELECT a FROM u v WHERE (1 = v.a))",
+            ),
+            (
+                "x IN (SELECT a FROM u \"V\")",
+                "x IN (SELECT a FROM u \"V\")",
+            ),
+            (
+                "x IN (SELECT a FROM u AS \"where\")",
+                "x IN (SELECT a FROM u \"where\")",
+            ),
+        ],
+    );
+    // MySQL matches table names by case, and a table alias with them.
+    assert_canonical(
+        &MySqlDialect {},
+        &[
+            ("x IN (SELECT a FROM m AS V)", "x IN (SELECT a FROM m V)"),
+            ("x IN (SELECT a FROM m v)", "x IN (SELECT a FROM m v)"),
+        ],
+    );
+}
+
+#[test]
+fn a_list_never_opens_with_an_item_read_as_a_query() {
+    assert_canonical(
+        &PostgreSqlDialect {},
+        &[
+            (
+                "amount IN (1, ((SELECT amount FROM orders)))",
+                "amount IN (1, (SELECT amount FROM orders))",
+            ),
+            (
+                "x IN (2, (SELECT b FROM o), (SELECT a FROM o))",
+                "x IN (2, (SELECT a FROM o), (SELECT b FROM o))",
+            ),
+            (
+                "x IN (2, (SELECT a FROM o)[1])",
+                "x IN (((SELECT a FROM o)[1]), 2)",
+            ),
+            (
+                "x IN (((SELECT a FROM o)[1]), (SELECT b FROM o))",
+                "x IN (((SELECT a FROM o)[1]), (SELECT b FROM o))",
+            ),
+        ],
+    );
+}
+
+#[test]
 fn subqueries_outside_the_served_shape_are_refused() {
     assert_unsupported(
         &PostgreSqlDialect {},
@@ -1368,7 +1430,7 @@ fn subqueries_outside_the_served_shape_are_refused() {
             "x IN (SELECT a FROM u LIMIT 1)",
             "x IN (SELECT DISTINCT a FROM u)",
             "x IN (SELECT a AS b FROM u)",
-            "x IN (SELECT a FROM u AS v)",
+            "x IN (SELECT a FROM u AS v (b))",
             "x IN (SELECT a FROM u JOIN v ON u.a = v.a)",
             "x IN (SELECT a FROM u UNION SELECT a FROM v)",
             "EXISTS (SELECT u.* FROM u)",

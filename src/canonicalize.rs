@@ -10,7 +10,7 @@ use sqlparser::ast::{
     AccessExpr, BinaryOperator, CastKind, CeilFloorKind, DateTimeField, Distinct, Expr,
     ExtractSyntax, Function, FunctionArg, FunctionArgExpr, FunctionArguments, GroupByExpr, Ident,
     Interval, LimitClause, ObjectName, Query, Select, SelectItem, SelectModifiers, SetExpr,
-    Statement, Subscript, TableFactor, UnaryOperator, Value,
+    Statement, Subscript, TableAlias, TableFactor, UnaryOperator, Value,
 };
 use sqlparser::dialect::{AnsiDialect, Dialect, MySqlDialect, PostgreSqlDialect, SQLiteDialect};
 use sqlparser::keywords::ALL_KEYWORDS;
@@ -426,17 +426,29 @@ fn normalize_expr_inner(
             list,
             negated,
         } => {
-            let mut items: Vec<String> = list
+            // sqlparser reads a list that opens with a query as `IN (query)` and does not take
+            // that back, so a bare subquery, which no parentheses can hide, goes last.
+            let mut items: Vec<(bool, String)> = list
                 .iter()
-                .map(|item| normalize_expr_inner(item, depth + 1, true, context))
-                .collect::<Result<_, _>>()?;
+                .map(|item| {
+                    let item = normalize_expr_inner(item, depth + 1, true, context)?;
+                    Ok(list_item(item, context))
+                })
+                .collect::<Result<_, CanonicalizeError>>()?;
             items.sort();
             let not = if *negated { "NOT " } else { "" };
-            format!(
-                "{} {not}IN ({})",
-                normalize_expr_inner(expr, depth + 1, true, context)?,
-                items.join(", ")
-            )
+            let mut text = format!(
+                "{} {not}IN (",
+                normalize_expr_inner(expr, depth + 1, true, context)?
+            );
+            for (index, (_, item)) in items.iter().enumerate() {
+                if index > 0 {
+                    text.push_str(", ");
+                }
+                text.push_str(item);
+            }
+            text.push(')');
+            text
         }
         Expr::InSubquery {
             expr,
@@ -971,6 +983,34 @@ fn qualified_name_text<'i>(
         .join("."))
 }
 
+/// Spells a list item so that it reads back as an item wherever sorting puts it, paired with
+/// whether it still starts with a query and so must not come first.
+///
+/// Enclosing hides a query that only starts the item, as in `(SELECT a FROM u)[1]`. A bare
+/// subquery keeps its query first however many parentheses enclose it.
+fn list_item(item: String, context: &Canonicalizer<'_>) -> (bool, String) {
+    if !starts_with_query(&item, context) {
+        return (false, item);
+    }
+    let enclosed = format!("({item})");
+    if starts_with_query(&enclosed, context) {
+        (true, item)
+    } else {
+        (false, enclosed)
+    }
+}
+
+/// Reports whether sqlparser reads a query at the start of `text`, as it tries to at the start
+/// of an `IN` list. A query starts with a parenthesis or a keyword, so a literal or a quoted
+/// name is answered without parsing.
+fn starts_with_query(text: &str, context: &Canonicalizer<'_>) -> bool {
+    text.starts_with(|first: char| first == '(' || first.is_ascii_alphabetic())
+        && Parser::new(context.dialect)
+            .try_with_sql(text)
+            .and_then(|mut parser| parser.parse_query())
+            .is_ok()
+}
+
 /// The error for an expression form no `WHERE` clause of a served query can hold.
 fn refused(form: &str) -> CanonicalizeError {
     CanonicalizeError::Unsupported(format!("{form} is not supported in a predicate"))
@@ -978,8 +1018,10 @@ fn refused(form: &str) -> CanonicalizeError {
 
 /// Spells a subquery in the shape the crate serves, `SELECT items FROM table [WHERE filter]`.
 ///
-/// Inside a subquery, grouping, ordering and aliases change which rows the outer predicate
-/// sees, so they are refused along with every clause an outer query may not carry.
+/// Inside a subquery, grouping, ordering and column aliases change which rows the outer
+/// predicate sees, so they are refused along with every clause an outer query may not carry.
+/// A table alias only names the table for the qualifiers that follow, so it is kept, folded as
+/// a qualifier and written without `AS`, which Oracle refuses there.
 fn subquery_text(
     query: &Query,
     depth: usize,
@@ -1001,7 +1043,7 @@ fn subquery_text(
     }
     let TableFactor::Table {
         name,
-        alias: None,
+        alias,
         args: None,
         with_hints,
         version: None,
@@ -1012,7 +1054,7 @@ fn subquery_text(
         index_hints,
     } = &select.from[0].relation
     else {
-        return Err(unsupported("a table alias or table option"));
+        return Err(unsupported("a table option"));
     };
     if !with_hints.is_empty() || !partitions.is_empty() || !index_hints.is_empty() {
         return Err(unsupported("a table hint"));
@@ -1048,6 +1090,24 @@ fn subquery_text(
         .collect::<Result<Vec<_>, _>>()?
         .join(".");
     let mut text = format!("SELECT {items} FROM {table}");
+    if let Some(TableAlias {
+        explicit: _,
+        name,
+        columns,
+        at,
+    }) = alias
+    {
+        if !columns.is_empty() || at.is_some() {
+            return Err(unsupported("a table alias with columns or an index"));
+        }
+        text.push(' ');
+        text.push_str(&identifier_text(
+            name,
+            context.qualifier_folding,
+            NamePlace::Operand,
+            context,
+        )?);
+    }
     // `WHERE TRUE` keeps every row, as a missing `WHERE` does, where `TRUE` is reserved.
     if let Some(filter) = select
         .selection
