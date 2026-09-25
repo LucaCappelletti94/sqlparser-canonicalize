@@ -6,8 +6,8 @@ use core::hash::{Hash, Hasher};
 
 use seahash::SeaHasher;
 use sqlparser::ast::{
-    BinaryOperator, CastKind, Distinct, Expr, Ident, LimitClause, Query, Select, SelectModifiers,
-    SetExpr, Statement, TableFactor, UnaryOperator, Value,
+    BinaryOperator, CastKind, Distinct, Expr, Ident, LimitClause, ObjectName, Query, Select,
+    SelectModifiers, SetExpr, Statement, TableFactor, UnaryOperator, Value,
 };
 use sqlparser::dialect::{AnsiDialect, Dialect, MySqlDialect, PostgreSqlDialect, SQLiteDialect};
 use sqlparser::keywords::ALL_KEYWORDS;
@@ -365,15 +365,41 @@ fn normalize_expr_inner(
             unary_operator_text(op)?,
             normalize_expr_inner(expr, depth + 1, true, context)?
         ),
-        Expr::IsNull(expr) => format!(
-            "{} IS NULL",
-            normalize_expr_inner(expr, depth + 1, true, context)?
-        ),
-        Expr::IsNotNull(expr) => {
-            format!(
-                "{} IS NOT NULL",
-                normalize_expr_inner(expr, depth + 1, true, context)?
-            )
+        Expr::IsNull(operand) => postfix_text(operand, "IS NULL", depth, context)?,
+        Expr::IsNotNull(operand) => postfix_text(operand, "IS NOT NULL", depth, context)?,
+        Expr::IsTrue(operand) => postfix_text(operand, "IS TRUE", depth, context)?,
+        Expr::IsNotTrue(operand) => postfix_text(operand, "IS NOT TRUE", depth, context)?,
+        Expr::IsFalse(operand) => postfix_text(operand, "IS FALSE", depth, context)?,
+        Expr::IsNotFalse(operand) => postfix_text(operand, "IS NOT FALSE", depth, context)?,
+        Expr::IsUnknown(operand) => postfix_text(operand, "IS UNKNOWN", depth, context)?,
+        Expr::IsNotUnknown(operand) => postfix_text(operand, "IS NOT UNKNOWN", depth, context)?,
+        Expr::IsJson {
+            expr,
+            kind,
+            unique_keys,
+            negated,
+        } => {
+            let not = if *negated { "NOT " } else { "" };
+            let mut suffix = format!("IS {not}JSON");
+            if let Some(kind) = kind {
+                suffix.push_str(&format!(" {kind}"));
+            }
+            if let Some(unique_keys) = unique_keys {
+                suffix.push_str(&format!(" {unique_keys}"));
+            }
+            postfix_text(expr, &suffix, depth, context)?
+        }
+        Expr::IsNormalized {
+            expr,
+            form,
+            negated,
+        } => {
+            let not = if *negated { "NOT " } else { "" };
+            let suffix = form.as_ref().map_or_else(
+                || format!("IS {not}NORMALIZED"),
+                |form| format!("IS {not}{form} NORMALIZED"),
+            );
+            postfix_text(expr, &suffix, depth, context)?
         }
         Expr::InList {
             expr,
@@ -418,62 +444,116 @@ fn normalize_expr_inner(
             )
         }
         Expr::Like {
+            negated,
+            any,
             expr,
             pattern,
-            negated,
             escape_char,
-            ..
         } => {
-            let not = if *negated { "NOT " } else { "" };
-            let escape = escape_char
-                .as_ref()
-                .map_or_else(String::new, |value| format!(" ESCAPE {value}"));
-            format!(
-                "{} {not}LIKE {}{escape}",
-                normalize_expr_inner(expr, depth + 1, true, context)?,
-                normalize_expr_inner(pattern, depth + 1, true, context)?
-            )
+            let operator = match_operator(*negated, "LIKE");
+            let escape = escape_char.as_deref();
+            pattern_match_text(expr, &operator, *any, pattern, escape, depth, context)?
         }
         Expr::ILike {
+            negated,
+            any,
             expr,
             pattern,
-            negated,
             escape_char,
-            ..
         } => {
-            let not = if *negated { "NOT " } else { "" };
-            let escape = escape_char
+            let operator = match_operator(*negated, "ILIKE");
+            let escape = escape_char.as_deref();
+            pattern_match_text(expr, &operator, *any, pattern, escape, depth, context)?
+        }
+        Expr::SimilarTo {
+            negated,
+            expr,
+            pattern,
+            escape_char,
+        } => {
+            let operator = match_operator(*negated, "SIMILAR TO");
+            let escape = escape_char.as_deref();
+            pattern_match_text(expr, &operator, false, pattern, escape, depth, context)?
+        }
+        // `REGEXP` and `RLIKE` are one operator. `RLIKE` is the spelling every dialect reads
+        // back as it, because SQLite reads `REGEXP` as an operator of its own.
+        Expr::RLike {
+            negated,
+            expr,
+            pattern,
+            regexp: _,
+        } => {
+            let operator = match_operator(*negated, "RLIKE");
+            pattern_match_text(expr, &operator, false, pattern, None, depth, context)?
+        }
+        // `SOME` and `ANY` are one quantifier.
+        Expr::AnyOp {
+            left,
+            compare_op,
+            right,
+            is_some: _,
+        } => quantified_text(left, compare_op, "ANY", right, depth, context)?,
+        Expr::AllOp {
+            left,
+            compare_op,
+            right,
+        } => quantified_text(left, compare_op, "ALL", right, depth, context)?,
+        Expr::MemberOf(member) => format!(
+            "{} MEMBER OF({})",
+            normalize_expr_inner(&member.value, depth + 1, true, context)?,
+            normalize_expr_inner(&member.array, depth + 1, false, context)?
+        ),
+        Expr::AtTimeZone {
+            timestamp,
+            time_zone,
+        } => format!(
+            "{} AT TIME ZONE {}",
+            normalize_expr_inner(timestamp, depth + 1, true, context)?,
+            normalize_expr_inner(time_zone, depth + 1, true, context)?
+        ),
+        // A collation name is kept as written, because whether it is case sensitive differs
+        // by dialect and by server.
+        Expr::Collate { expr, collation } => format!(
+            "{} COLLATE {collation}",
+            normalize_expr_inner(expr, depth + 1, true, context)?
+        ),
+        Expr::MatchAgainst {
+            columns,
+            match_value,
+            opt_search_modifier,
+        } => {
+            let columns = columns
+                .iter()
+                .map(|column| object_name_text(column, context))
+                .collect::<Result<Vec<_>, _>>()?
+                .join(", ");
+            reject_lossy_quoting(&match_value.value)?;
+            let modifier = opt_search_modifier
                 .as_ref()
-                .map_or_else(String::new, |value| format!(" ESCAPE {value}"));
+                .map_or_else(String::new, |modifier| format!(" {modifier}"));
             format!(
-                "{} {not}ILIKE {}{escape}",
-                normalize_expr_inner(expr, depth + 1, true, context)?,
-                normalize_expr_inner(pattern, depth + 1, true, context)?
+                "MATCH ({columns}) AGAINST ({}{modifier})",
+                match_value.value
             )
         }
         Expr::Nested(inner) => normalize_expr_inner(inner, depth + 1, tight_parent, context)?,
         Expr::Identifier(identifier) => identifier_text(identifier, context.folding)?,
-        Expr::CompoundIdentifier(parts) => {
-            let column = parts.len().saturating_sub(1);
-            parts
-                .iter()
-                .enumerate()
-                .map(|(index, part)| {
-                    let folding = if index == column {
-                        context.folding
-                    } else {
-                        context.qualifier_folding
-                    };
-                    identifier_text(part, folding)
-                })
-                .collect::<Result<Vec<_>, _>>()?
-                .join(".")
-        }
+        Expr::CompoundIdentifier(parts) => qualified_name_text(parts.iter(), context)?,
         Expr::Value(value) => {
             reject_lossy_quoting(&value.value)?;
             format!("{}", value.value)
         }
-        Expr::Function(function) => format!("{function}"),
+        // sqlparser reads `:` as a JSON path even in dialects without one, and can build a
+        // tree its printer spells with another grouping.
+        Expr::JsonAccess { .. } => {
+            return Err(CanonicalizeError::Unsupported(
+                "JSON path access is not supported".to_string(),
+            ));
+        }
+        Expr::Function(function) => {
+            reject_quantifier_name(&function.name)?;
+            format!("{function}")
+        }
         _ => format!("{expr}"),
     };
     Ok(if tight_parent && !encloses_itself(expr) {
@@ -501,6 +581,147 @@ fn infix_text(
         (left, right)
     };
     Ok(format!("({left} {operator} {right})"))
+}
+
+/// Spells `operand suffix` for a postfix test such as `IS NULL`.
+fn postfix_text(
+    operand: &Expr,
+    suffix: &str,
+    depth: usize,
+    context: &Canonicalizer<'_>,
+) -> Result<String, CanonicalizeError> {
+    let operand = normalize_expr_inner(operand, depth + 1, true, context)?;
+    Ok(format!("{operand} {suffix}"))
+}
+
+/// Spells the operator of a pattern match, such as `NOT SIMILAR TO`.
+fn match_operator(negated: bool, operator: &str) -> String {
+    if negated {
+        format!("NOT {operator}")
+    } else {
+        operator.to_string()
+    }
+}
+
+/// Spells `subject operator pattern`, with `ANY` before a pattern list and `ESCAPE` after the
+/// pattern when the match has them.
+fn pattern_match_text(
+    subject: &Expr,
+    operator: &str,
+    any: bool,
+    pattern: &Expr,
+    escape: Option<&Expr>,
+    depth: usize,
+    context: &Canonicalizer<'_>,
+) -> Result<String, CanonicalizeError> {
+    let subject = normalize_expr_inner(subject, depth + 1, true, context)?;
+    let pattern = if any {
+        format!("ANY {}", argument_text(pattern, depth, context)?)
+    } else {
+        normalize_expr_inner(pattern, depth + 1, true, context)?
+    };
+    let escape = match escape {
+        Some(escape) => format!(
+            " ESCAPE {}",
+            normalize_expr_inner(escape, depth + 1, true, context)?
+        ),
+        None => String::new(),
+    };
+    Ok(format!("{subject} {operator} {pattern}{escape}"))
+}
+
+/// Spells `left operator quantifier(right)` for `ANY` and `ALL`.
+fn quantified_text(
+    left: &Expr,
+    operator: &BinaryOperator,
+    quantifier: &str,
+    right: &Expr,
+    depth: usize,
+    context: &Canonicalizer<'_>,
+) -> Result<String, CanonicalizeError> {
+    let left = normalize_expr_inner(left, depth + 1, true, context)?;
+    let operator = operator_text(operator)?;
+    let right = argument_text(right, depth, context)?;
+    Ok(format!("{left} {operator} {quantifier}{right}"))
+}
+
+/// Spells the parenthesized argument of `ANY`, `ALL` or `LIKE ANY`. A tuple or a subquery
+/// brings its own parentheses, so however many enclose it in the input, it gets one pair.
+fn argument_text(
+    argument: &Expr,
+    depth: usize,
+    context: &Canonicalizer<'_>,
+) -> Result<String, CanonicalizeError> {
+    let text = normalize_expr_inner(argument, depth + 1, false, context)?;
+    let mut inner = argument;
+    while let Expr::Nested(nested) = inner {
+        inner = nested;
+    }
+    Ok(if matches!(inner, Expr::Tuple(_) | Expr::Subquery(_)) {
+        text
+    } else {
+        format!("({text})")
+    })
+}
+
+/// Refuses a call to a function named `ANY`, `SOME` or `ALL`.
+///
+/// Once ordering puts such a call on the right of a comparison, `1 = ANY(x)` reads back as a
+/// quantified comparison, which is another predicate with the same text.
+fn reject_quantifier_name(name: &ObjectName) -> Result<(), CanonicalizeError> {
+    let quantifier = match name.0.as_slice() {
+        [part] => part.as_ident().is_some_and(|ident| {
+            ident.quote_style.is_none()
+                && ["ANY", "SOME", "ALL"]
+                    .iter()
+                    .any(|keyword| ident.value.eq_ignore_ascii_case(keyword))
+        }),
+        _ => false,
+    };
+    if quantifier {
+        Err(CanonicalizeError::Unsupported(format!(
+            "Function named {name} reads back as a quantifier"
+        )))
+    } else {
+        Ok(())
+    }
+}
+
+/// Spells a dotted name, folding the last part as a column and the others as qualifiers.
+fn qualified_name_text<'i>(
+    parts: impl ExactSizeIterator<Item = &'i Ident>,
+    context: &Canonicalizer<'_>,
+) -> Result<String, CanonicalizeError> {
+    let column = parts.len().saturating_sub(1);
+    Ok(parts
+        .enumerate()
+        .map(|(index, part)| {
+            let folding = if index == column {
+                context.folding
+            } else {
+                context.qualifier_folding
+            };
+            identifier_text(part, folding)
+        })
+        .collect::<Result<Vec<_>, _>>()?
+        .join("."))
+}
+
+/// Spells an object name that names a column, refusing a part computed by a function.
+fn object_name_text(
+    name: &ObjectName,
+    context: &Canonicalizer<'_>,
+) -> Result<String, CanonicalizeError> {
+    let parts = name
+        .0
+        .iter()
+        .map(|part| {
+            part.as_ident().ok_or_else(|| {
+                CanonicalizeError::Unsupported(format!("Computed name part: {part}"))
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    qualified_name_text(parts.into_iter(), context)
 }
 
 /// Reports whether `expr` prints as text no neighbouring operator can split.

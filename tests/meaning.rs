@@ -46,7 +46,10 @@ enum Tree {
     Postfix(&'static str, Box<Tree>),
     In(Box<Tree>, Vec<Tree>, bool),
     Between(Box<Tree>, Box<Tree>, Box<Tree>, bool),
-    Like(&'static str, Box<Tree>, Box<Tree>, bool),
+    /// Operator, subject, pattern, negated, and `ANY` for `LIKE ANY` and `ILIKE ANY`.
+    Like(&'static str, Box<Tree>, Box<Tree>, bool, bool),
+    Quantified(&'static str, &'static str, Box<Tree>, Box<Tree>),
+    AtTimeZone(Box<Tree>, Box<Tree>),
     Coalesce(Box<Tree>, Box<Tree>),
     Cast(Box<Tree>),
     Case(Box<Tree>, Box<Tree>, Box<Tree>),
@@ -79,15 +82,19 @@ const SYMMETRIC: &[&str] = &[
     "IS DISTINCT FROM",
     "IS NOT DISTINCT FROM",
 ];
-const NORMALIZED_POSTFIX: &[&str] = &["IS NULL", "IS NOT NULL"];
-const ALL_POSTFIX: &[&str] = &[
+const POSTFIX: &[&str] = &[
     "IS NULL",
     "IS NOT NULL",
     "IS TRUE",
     "IS NOT TRUE",
     "IS FALSE",
+    "IS NOT FALSE",
     "IS UNKNOWN",
+    "IS NOT UNKNOWN",
 ];
+const PATTERN_MATCH: &[&str] = &["LIKE", "ILIKE", "SIMILAR TO", "RLIKE", "REGEXP"];
+const COMPARISON: &[&str] = &["=", "!=", "<", ">="];
+const QUANTIFIER: &[&str] = &["ANY", "SOME", "ALL"];
 const ATOMS: &[(&str, bool)] = &[
     ("a", true),
     ("b", true),
@@ -110,16 +117,11 @@ fn tree(rng: &mut Rng, depth: u32, quoted: &'static str, normalized_only: bool) 
         return Tree::Atom(text, identifier);
     }
     let child = |rng: &mut Rng| Box::new(tree(rng, depth - 1, quoted, normalized_only));
-    let postfix = if normalized_only {
-        NORMALIZED_POSTFIX
-    } else {
-        ALL_POSTFIX
-    };
-    match rng.below(if normalized_only { 11 } else { 14 }) {
+    match rng.below(if normalized_only { 13 } else { 16 }) {
         0..=4 => Tree::Binary(BINARY[rng.below(BINARY.len())], child(rng), child(rng)),
         5 => Tree::Not(child(rng)),
         6 => Tree::Negate(child(rng)),
-        7 => Tree::Postfix(postfix[rng.below(postfix.len())], child(rng)),
+        7 => Tree::Postfix(POSTFIX[rng.below(POSTFIX.len())], child(rng)),
         8 => {
             let items = (0..=rng.below(3))
                 .map(|_| tree(rng, depth - 1, quoted, normalized_only))
@@ -128,11 +130,18 @@ fn tree(rng: &mut Rng, depth: u32, quoted: &'static str, normalized_only: bool) 
         }
         9 => Tree::Between(child(rng), child(rng), child(rng), rng.percent(50)),
         10 => {
-            let operator = if rng.percent(70) { "LIKE" } else { "ILIKE" };
-            Tree::Like(operator, child(rng), child(rng), rng.percent(50))
+            let operator = PATTERN_MATCH[rng.below(PATTERN_MATCH.len())];
+            let any = matches!(operator, "LIKE" | "ILIKE") && rng.percent(20);
+            Tree::Like(operator, child(rng), child(rng), rng.percent(50), any)
         }
-        11 => Tree::Coalesce(child(rng), child(rng)),
-        12 => Tree::Cast(child(rng)),
+        11 => {
+            let comparison = COMPARISON[rng.below(COMPARISON.len())];
+            let quantifier = QUANTIFIER[rng.below(QUANTIFIER.len())];
+            Tree::Quantified(comparison, quantifier, child(rng), child(rng))
+        }
+        12 => Tree::AtTimeZone(child(rng), child(rng)),
+        13 => Tree::Coalesce(child(rng), child(rng)),
+        14 => Tree::Cast(child(rng)),
         _ => Tree::Case(child(rng), child(rng), child(rng)),
     }
 }
@@ -218,13 +227,36 @@ fn spell(tree: &Tree, spelling: Spelling, rng: &mut Rng) -> String {
                 keyword(not, spelling, rng)
             )
         }
-        Tree::Like(operator, subject, pattern, negated) => {
+        Tree::Like(operator, subject, pattern, negated, any) => {
             let (subject, pattern) = (operand(subject, rng), operand(pattern, rng));
             let not = if *negated { "NOT " } else { "" };
             let not = keyword(not, spelling, rng);
+            let any = if *any {
+                keyword(" ANY", spelling, rng)
+            } else {
+                String::new()
+            };
             format!(
-                "{subject} {not}{} {pattern}",
+                "{subject} {not}{}{any} {pattern}",
                 keyword(operator, spelling, rng)
+            )
+        }
+        Tree::Quantified(comparison, quantifier, left, right) => {
+            let (left, right) = (operand(left, rng), spell(right, spelling, rng));
+            let quantifier = match *quantifier {
+                "ANY" | "SOME" if spelling.flip_keyword_case && rng.percent(50) => {
+                    if *quantifier == "ANY" { "SOME" } else { "ANY" }
+                }
+                other => other,
+            };
+            let quantifier = keyword(quantifier, spelling, rng);
+            format!("{left} {comparison} {quantifier}({right})")
+        }
+        Tree::AtTimeZone(timestamp, zone) => {
+            let (timestamp, zone) = (operand(timestamp, rng), operand(zone, rng));
+            format!(
+                "{timestamp} {} {zone}",
+                keyword("AT TIME ZONE", spelling, rng)
             )
         }
         Tree::Coalesce(first, second) => {

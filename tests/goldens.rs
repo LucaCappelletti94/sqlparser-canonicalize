@@ -823,6 +823,42 @@ const GOLDENS: &[Golden] = &[
         normalized: "(\"status\" = 'paid')",
         hash: 112717352067792148743778502094369901298,
     },
+    Golden {
+        dialect: DialectKind::PostgreSql,
+        sql: "SELECT * FROM t WHERE Active IS NOT TRUE",
+        normalized: "active IS NOT TRUE",
+        hash: 169325908433798865918380666061595783232,
+    },
+    Golden {
+        dialect: DialectKind::PostgreSql,
+        sql: "SELECT * FROM t WHERE Name SIMILAR TO 'a%'",
+        normalized: "name SIMILAR TO 'a%'",
+        hash: 293999106747452751383688411230001914370,
+    },
+    Golden {
+        dialect: DialectKind::PostgreSql,
+        sql: "SELECT * FROM t WHERE Id = SOME(Ids)",
+        normalized: "id = ANY(ids)",
+        hash: 252311792306329106316691031148903498536,
+    },
+    Golden {
+        dialect: DialectKind::MySql,
+        sql: "SELECT * FROM t WHERE Name REGEXP '^a'",
+        normalized: "name RLIKE '^a'",
+        hash: 191561548683398552017483930128739763238,
+    },
+    Golden {
+        dialect: DialectKind::MySql,
+        sql: "SELECT * FROM t WHERE 3 MEMBER OF(Tags)",
+        normalized: "3 MEMBER OF(tags)",
+        hash: 177081032619041551905878422141399186199,
+    },
+    Golden {
+        dialect: DialectKind::SQLite,
+        sql: "SELECT * FROM t WHERE Flag IS UNKNOWN",
+        normalized: "flag IS UNKNOWN",
+        hash: 268016679043104776737949376478094949884,
+    },
 ];
 
 fn normalize_with_dialect(sql: &str, dialect: DialectKind) -> String {

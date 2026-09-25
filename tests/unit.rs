@@ -1,5 +1,5 @@
 use sqlparser::ast::{SetExpr, Statement};
-use sqlparser::dialect::{Dialect, MySqlDialect, PostgreSqlDialect};
+use sqlparser::dialect::{Dialect, MySqlDialect, PostgreSqlDialect, SQLiteDialect};
 use sqlparser::parser::Parser;
 use sqlparser_canonicalize::{CanonicalizeError, Canonicalizer, hash_canonical};
 
@@ -833,33 +833,37 @@ fn null_safe_comparisons_keep_predicate_operands_enclosed() {
 }
 
 #[test]
-fn a_verbatim_predicate_as_operand_keeps_its_grouping() {
+fn a_predicate_as_operand_keeps_its_grouping() {
     let postgres = [
         ("z LIKE (x IS TRUE)", "z LIKE (x IS TRUE)"),
-        ("z LIKE x IS TRUE", "z LIKE x IS TRUE"),
+        ("z LIKE x IS TRUE", "(z LIKE x) IS TRUE"),
         ("z NOT ILIKE (x IS UNKNOWN)", "z NOT ILIKE (x IS UNKNOWN)"),
-        ("z NOT ILIKE x IS UNKNOWN", "z NOT ILIKE x IS UNKNOWN"),
+        ("z NOT ILIKE x IS UNKNOWN", "(z NOT ILIKE x) IS UNKNOWN"),
         ("z BETWEEN 1 AND (x IS TRUE)", "z BETWEEN 1 AND (x IS TRUE)"),
-        ("z BETWEEN 1 AND x IS TRUE", "z BETWEEN 1 AND x IS TRUE"),
+        ("z BETWEEN 1 AND x IS TRUE", "(z BETWEEN 1 AND x) IS TRUE"),
+        ("z LIKE ((x IS TRUE))", "z LIKE (x IS TRUE)"),
         ("z LIKE (x = ANY(y))", "z LIKE (x = ANY(y))"),
         ("z LIKE (x SIMILAR TO 'y')", "z LIKE (x SIMILAR TO 'y')"),
     ];
     assert_canonical(&PostgreSqlDialect {}, &postgres);
     let mysql = [
-        ("(x REGEXP 'y') IN (1)", "(x REGEXP 'y') IN (1)"),
-        ("x REGEXP 'y' IN (1)", "x REGEXP 'y' IN (1)"),
+        ("(x REGEXP 'y') IN (1)", "(x RLIKE 'y') IN (1)"),
+        ("x REGEXP 'y' IN (1)", "x RLIKE ('y' IN (1))"),
         (
             "(x RLIKE 'y') BETWEEN 1 AND 2",
             "(x RLIKE 'y') BETWEEN 1 AND 2",
         ),
-        ("x RLIKE 'y' BETWEEN 1 AND 2", "x RLIKE 'y' BETWEEN 1 AND 2"),
+        (
+            "x RLIKE 'y' BETWEEN 1 AND 2",
+            "x RLIKE ('y' BETWEEN 1 AND 2)",
+        ),
         ("z LIKE (x MEMBER OF (y))", "z LIKE (x MEMBER OF(y))"),
     ];
     assert_canonical(&MySqlDialect {}, &mysql);
 }
 
 #[test]
-fn a_verbatim_predicate_as_operand_is_accepted() {
+fn a_predicate_as_operand_is_accepted() {
     assert_canonical(
         &PostgreSqlDialect {},
         &[
@@ -885,4 +889,148 @@ fn mysql_keeps_the_case_of_a_table_qualifier() {
         ],
     );
     assert_canonical(&PostgreSqlDialect {}, &[("T.A = 1", "(1 = t.a)")]);
+}
+
+#[test]
+fn truth_tests_normalize_their_operand() {
+    assert_canonical(
+        &PostgreSqlDialect {},
+        &[
+            ("A IS TRUE", "a IS TRUE"),
+            ("(a) IS NOT TRUE", "a IS NOT TRUE"),
+            ("A IS FALSE", "a IS FALSE"),
+            ("((a)) IS NOT FALSE", "a IS NOT FALSE"),
+            ("A IS UNKNOWN", "a IS UNKNOWN"),
+            ("A IS NOT UNKNOWN", "a IS NOT UNKNOWN"),
+            ("(A = 1) IS TRUE", "(1 = a) IS TRUE"),
+        ],
+    );
+}
+
+#[test]
+fn pattern_and_regular_expression_matches_normalize_their_operands() {
+    assert_canonical(
+        &PostgreSqlDialect {},
+        &[
+            ("(X) SIMILAR TO 'y%'", "x SIMILAR TO 'y%'"),
+            (
+                "X NOT SIMILAR TO 'a!%' ESCAPE '!'",
+                "x NOT SIMILAR TO 'a!%' ESCAPE '!'",
+            ),
+        ],
+    );
+    assert_canonical(
+        &MySqlDialect {},
+        &[
+            ("X REGEXP 'y'", "x RLIKE 'y'"),
+            ("x RLIKE 'y'", "x RLIKE 'y'"),
+            ("X NOT REGEXP ('y')", "x NOT RLIKE 'y'"),
+        ],
+    );
+    assert_canonical(&SQLiteDialect {}, &[("X RLIKE 'y'", "x RLIKE 'y'")]);
+}
+
+#[test]
+fn quantified_comparisons_normalize_their_operands() {
+    assert_canonical(
+        &PostgreSqlDialect {},
+        &[
+            ("X = SOME(Arr)", "x = ANY(arr)"),
+            ("x = ANY((arr))", "x = ANY(arr)"),
+            ("X <> ALL(Arr)", "x != ALL(arr)"),
+        ],
+    );
+}
+
+#[test]
+fn json_and_normalization_tests_normalize_their_operand() {
+    assert_canonical(
+        &PostgreSqlDialect {},
+        &[
+            ("D IS JSON", "d IS JSON"),
+            ("(d) IS NOT JSON OBJECT", "d IS NOT JSON OBJECT"),
+            ("S IS NFC NORMALIZED", "s IS NFC NORMALIZED"),
+            ("(s) IS NOT NORMALIZED", "s IS NOT NORMALIZED"),
+        ],
+    );
+}
+
+#[test]
+fn time_zone_and_collation_normalize_their_operand() {
+    assert_canonical(
+        &PostgreSqlDialect {},
+        &[
+            (
+                "(T) AT TIME ZONE 'UTC' > now()",
+                "((t AT TIME ZONE 'UTC') > now())",
+            ),
+            ("Name COLLATE \"C\" = 'x'", "('x' = (name COLLATE \"C\"))"),
+        ],
+    );
+}
+
+#[test]
+fn mysql_membership_and_full_text_search_normalize_their_names() {
+    assert_canonical(
+        &MySqlDialect {},
+        &[
+            ("3 MEMBER OF(J)", "3 MEMBER OF(j)"),
+            (
+                "MATCH (Title, Body) AGAINST ('x' IN BOOLEAN MODE)",
+                "MATCH (title, body) AGAINST ('x' IN BOOLEAN MODE)",
+            ),
+        ],
+    );
+}
+
+#[test]
+fn a_quantified_pattern_match_keeps_its_quantifier() {
+    for dialect in [&PostgreSqlDialect {} as &dyn Dialect, &MySqlDialect {}] {
+        assert_canonical(
+            dialect,
+            &[
+                ("x LIKE ANY ('a', 'b')", "x LIKE ANY ('a', 'b')"),
+                ("x LIKE ('a', 'b')", "x LIKE ('a', 'b')"),
+                ("X NOT ILIKE ANY (('a', 'b'))", "x NOT ILIKE ANY ('a', 'b')"),
+            ],
+        );
+    }
+}
+
+#[test]
+fn a_call_to_a_function_named_like_a_quantifier_is_refused() {
+    for predicate in ["z LIKE (ANY(x) = 1)", "SOME(x) != 1", "ALL(x) < 1"] {
+        assert!(
+            matches!(
+                Canonicalizer::new(&PostgreSqlDialect {})
+                    .normalize_sql(&format!("SELECT * FROM t WHERE {predicate}")),
+                Err(CanonicalizeError::Unsupported(_))
+            ),
+            "{predicate}"
+        );
+    }
+    assert_canonical(
+        &PostgreSqlDialect {},
+        &[("z LIKE (1 = ANY(x))", "z LIKE (1 = ANY(x))")],
+    );
+}
+
+#[test]
+fn json_path_access_is_refused() {
+    // sqlparser reads `:` as a JSON path in dialects without one, and can build a tree its
+    // printer spells as a different grouping.
+    for predicate in [
+        "a:b = 1",
+        "x = b:c && d",
+        "$$=I:OPz-T:t&&MMEkzte:I:$$=IME&&ME",
+    ] {
+        assert!(
+            matches!(
+                Canonicalizer::new(&MySqlDialect {})
+                    .normalize_sql(&format!("SELECT * FROM t WHERE {predicate}")),
+                Err(CanonicalizeError::Unsupported(_))
+            ),
+            "{predicate}"
+        );
+    }
 }
