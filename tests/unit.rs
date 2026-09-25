@@ -1,6 +1,7 @@
 use sqlparser::ast::{SetExpr, Statement};
 use sqlparser::dialect::{
-    AnsiDialect, Dialect, GenericDialect, MySqlDialect, PostgreSqlDialect, SQLiteDialect,
+    AnsiDialect, BigQueryDialect, Dialect, DuckDbDialect, GenericDialect, MsSqlDialect,
+    MySqlDialect, PostgreSqlDialect, SQLiteDialect, SnowflakeDialect,
 };
 use sqlparser::parser::Parser;
 use sqlparser_canonicalize::{CanonicalizeError, Canonicalizer, hash_canonical};
@@ -1226,4 +1227,101 @@ fn a_name_spelled_like_an_operator_is_quoted_or_refused() {
         )],
     );
     assert_unsupported(&GenericDialect {}, &["POSITION(NOT - (b) IN a) = 1"]);
+}
+
+#[test]
+fn a_quoted_function_name_keeps_its_quotes() {
+    // MySQL looks a quoted function name up among stored functions only.
+    assert_canonical(
+        &MySqlDialect {},
+        &[
+            ("`myfn`(Name) = 'x'", "('x' = `myfn`(name))"),
+            ("MyFn(Name) = 'x'", "('x' = myfn(name))"),
+        ],
+    );
+    assert_canonical(
+        &PostgreSqlDialect {},
+        &[
+            ("\"myfn\"(name) = 'x'", "(\"myfn\"(name) = 'x')"),
+            ("MyFn(name) = 'x'", "('x' = myfn(name))"),
+        ],
+    );
+}
+
+#[test]
+fn dialect_specific_value_forms_normalize_their_operands() {
+    assert_canonical(
+        &BigQueryDialect {},
+        &[
+            ("SAFE_CAST(A AS INT64) = 1", "(1 = SAFE_CAST(A AS INT64))"),
+            ("TRIM(S, 'x') = 'y'", "('y' = TRIM(S, 'x'))"),
+        ],
+    );
+    assert_canonical(
+        &SnowflakeDialect {},
+        &[("EXTRACT(YEAR, (D)) = 2020", "(2020 = EXTRACT(YEAR, D))")],
+    );
+    assert_canonical(
+        &MySqlDialect {},
+        &[
+            (
+                "CONVERT(A, CHAR CHARACTER SET utf8mb4) = 'x'",
+                "('x' = CONVERT(a, CHAR CHARACTER SET utf8mb4))",
+            ),
+            ("_utf8mb4'x' = A", "(_utf8mb4 'x' = a)"),
+        ],
+    );
+    assert_canonical(
+        &GenericDialect {},
+        &[
+            ("CEIL(D TO DAY) = D", "(CEIL(D TO DAY) = D)"),
+            ("CEIL(X, 2) = FLOOR(Y, 2)", "(CEIL(X, 2) = FLOOR(Y, 2))"),
+            ("F((X)).Y = 1", "(1 = F(X).Y)"),
+        ],
+    );
+    assert_canonical(&DuckDbDialect {}, &[("A[1:2:(3)] = B", "(A[1:2:3] = B)")]);
+}
+
+#[test]
+fn postgres_value_forms_keep_their_qualifiers() {
+    assert_canonical(
+        &PostgreSqlDialect {},
+        &[
+            ("TRIM(LEADING S) = 'x'", "('x' = TRIM(LEADING s))"),
+            (
+                "OVERLAY(S PLACING 'a' FROM 1 FOR (2)) = 'b'",
+                "('b' = OVERLAY(s PLACING 'a' FROM 1 FOR 2))",
+            ),
+            (
+                "D < INTERVAL '1' DAY TO HOUR",
+                "(d < (INTERVAL '1' DAY TO HOUR))",
+            ),
+            ("D < INTERVAL '1' DAY (2)", "(d < (INTERVAL '1' DAY (2)))"),
+            (
+                "D < INTERVAL '1' SECOND (2, 3)",
+                "(d < (INTERVAL '1' SECOND (2, 3)))",
+            ),
+            (
+                "D < INTERVAL '1' HOUR TO SECOND (3)",
+                "(d < (INTERVAL '1' HOUR TO SECOND (3)))",
+            ),
+            ("A[1:2] = B", "(a[1:2] = b)"),
+            ("A[:(2)] = B", "(a[:2] = b)"),
+            ("(C).F(x) = 1", "((c).f(x) = 1)"),
+            ("D IS JSON WITH UNIQUE KEYS", "d IS JSON WITH UNIQUE KEYS"),
+        ],
+    );
+}
+
+#[test]
+fn value_forms_without_a_single_spelling_are_refused() {
+    assert_unsupported(
+        &BigQueryDialect {},
+        &["CAST(A AS STRING FORMAT 'YYYY') = 'x'"],
+    );
+    assert_unsupported(&MsSqlDialect {}, &["CONVERT(INT, A) = 1"]);
+    assert_unsupported(
+        &GenericDialect {},
+        &["{d '2020-01-01'} = D", "x = ARRAY(SELECT 1)"],
+    );
 }

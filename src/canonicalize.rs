@@ -1271,8 +1271,8 @@ impl<'a> Canonicalizer<'a> {
 enum NamePlace {
     /// A column, table or field name, which a keyword spelling can turn into an expression.
     Operand,
-    /// A function name, which stays bare, because MySQL looks a quoted function name up among
-    /// stored functions and not among its own.
+    /// A function name, which keeps whether it was quoted, because MySQL looks a quoted
+    /// function name up among stored functions and not among its own.
     Function,
 }
 
@@ -1339,7 +1339,8 @@ fn bare_spelling_is_faithful(name: &str, quoted: bool, folding: Folding, place: 
         // and its enclosed arguments fail that syntax again.
         return place == NamePlace::Function || !starts_expression_syntax(name);
     }
-    if !is_plain_non_keyword(name) {
+    // A quoted function name stays quoted, because MySQL looks it up among stored functions.
+    if place == NamePlace::Function || !is_plain_non_keyword(name) {
         return false;
     }
     match folding {
