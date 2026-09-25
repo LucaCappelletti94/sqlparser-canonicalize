@@ -910,8 +910,8 @@ const GOLDENS: &[Golden] = &[
     Golden {
         dialect: DialectKind::SQLite,
         sql: "SELECT * FROM t WHERE NOT EXISTS (SELECT 1 FROM Orders WHERE Owner = Id)",
-        normalized: "NOT EXISTS (SELECT 1 FROM orders WHERE (id = owner))",
-        hash: 156233626803291239004552294045161112178,
+        normalized: "NOT EXISTS (SELECT 1 FROM orders WHERE (owner = id))",
+        hash: 36450148689480009697569547122790864796,
     },
 ];
 

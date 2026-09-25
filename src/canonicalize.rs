@@ -373,11 +373,11 @@ fn normalize_expr_inner(
             }
         }
         Expr::IsDistinctFrom(left, right) => {
-            let order = OperandOrder::Sorted;
+            let order = OperandOrder::Compared;
             infix_text(left, "IS DISTINCT FROM", right, order, depth, context)?
         }
         Expr::IsNotDistinctFrom(left, right) => {
-            let order = OperandOrder::Sorted;
+            let order = OperandOrder::Compared;
             infix_text(left, "IS NOT DISTINCT FROM", right, order, depth, context)?
         }
         Expr::UnaryOp { op, expr } => format!(
@@ -808,6 +808,9 @@ enum OperandOrder {
     Written,
     /// Either order is the same predicate or value.
     Sorted,
+    /// Either order is the same comparison where the operands' collation does not depend on
+    /// their order.
+    Compared,
     /// Swapping the operands takes the mirrored operator, as `a < b` is `b > a`.
     Mirrored(&'static str),
 }
@@ -829,6 +832,7 @@ fn infix_text(
     let right = normalize_expr_inner(right, depth + 1, true, context)?;
     let (left, operator, right) = match order {
         OperandOrder::Sorted if left > right => (right, operator, left),
+        OperandOrder::Compared if swappable && left > right => (right, operator, left),
         // Equal operands take whichever of the two operators sorts first, so `b > b` and
         // `b < b` share one spelling, which holds under any collation.
         OperandOrder::Mirrored(mirrored)
@@ -1260,10 +1264,14 @@ fn literal_access() -> CanonicalizeError {
     CanonicalizeError::Unsupported("A field access on a literal is not supported".to_string())
 }
 
-/// Reports whether `expr` is a literal, however many parentheses enclose it.
+/// Reports whether `expr` is a literal, signed or not, however many parentheses enclose it.
 fn is_literal(expr: &Expr) -> bool {
     match expr {
         Expr::Nested(inner) => is_literal(inner),
+        Expr::UnaryOp {
+            op: UnaryOperator::Minus | UnaryOperator::Plus,
+            expr,
+        } => is_literal(expr),
         Expr::Value(_) => true,
         _ => false,
     }
@@ -1672,11 +1680,10 @@ fn collect_flat_children<'a>(expr: &'a Expr, operator: &BinaryOperator) -> Vec<&
 /// Reads how `operator` treats the order of its operands under the canonicalizer's dialect.
 const fn operand_order(operator: &BinaryOperator, context: &Canonicalizer<'_>) -> OperandOrder {
     match operator {
-        BinaryOperator::And
-        | BinaryOperator::Or
-        | BinaryOperator::Eq
-        | BinaryOperator::NotEq
-        | BinaryOperator::Spaceship => OperandOrder::Sorted,
+        BinaryOperator::And | BinaryOperator::Or => OperandOrder::Sorted,
+        BinaryOperator::Eq | BinaryOperator::NotEq | BinaryOperator::Spaceship => {
+            OperandOrder::Compared
+        }
         // SQL Server also concatenates strings with `+`, where the order matters.
         BinaryOperator::Plus | BinaryOperator::Multiply if context.plus_is_numeric => {
             OperandOrder::Sorted

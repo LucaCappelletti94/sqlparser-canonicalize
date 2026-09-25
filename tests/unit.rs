@@ -1554,3 +1554,23 @@ fn field_access_on_a_literal_is_refused() {
         &["0 .l = 1", "0 .l.0. = 1", "a.l.0. = 1", "'x'.f = 1"],
     );
 }
+
+#[test]
+fn equality_between_two_columns_keeps_its_order_where_the_left_collation_wins() {
+    // SQLite compares `a = b` under `a`'s collation and `b = a` under `b`'s.
+    for dialect in [&SQLiteDialect {} as &dyn Dialect, &GenericDialect {}] {
+        assert_canonical(
+            dialect,
+            &[
+                ("b = a", "(b = a)"),
+                ("a = b", "(a = b)"),
+                ("b <> a", "(b != a)"),
+                ("b IS DISTINCT FROM a", "(b IS DISTINCT FROM a)"),
+                ("x = 1", "(1 = x)"),
+                ("1 = x", "(1 = x)"),
+                ("a IS NOT DISTINCT FROM 1", "(1 IS NOT DISTINCT FROM a)"),
+            ],
+        );
+    }
+    assert_canonical(&PostgreSqlDialect {}, &[("b = a", "(a = b)")]);
+}

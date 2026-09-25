@@ -127,7 +127,7 @@ pub fn meaning(expr: &Expr, folding: Folding) -> String {
                 BinaryOperator::Eq | BinaryOperator::NotEq | BinaryOperator::Spaceship
             ) =>
         {
-            let (left, right) = unordered(left, right, folding);
+            let (left, right) = compared(left, right, folding);
             format!("({op} {left} {right})")
         }
         // `a > b` and `b < a` are one comparison wherever the operands' collation does not depend
@@ -136,7 +136,7 @@ pub fn meaning(expr: &Expr, folding: Folding) -> String {
             left,
             op: op @ (BinaryOperator::Gt | BinaryOperator::GtEq),
             right,
-        } if mirrorable(left, right, folding) => {
+        } if swappable(left, right, folding) => {
             let mirrored = if matches!(op, BinaryOperator::Gt) {
                 "<"
             } else {
@@ -153,11 +153,11 @@ pub fn meaning(expr: &Expr, folding: Folding) -> String {
         }
         Expr::BinaryOp { left, op, right } => format!("({op} {} {})", m(left), m(right)),
         Expr::IsDistinctFrom(left, right) => {
-            let (left, right) = unordered(left, right, folding);
+            let (left, right) = compared(left, right, folding);
             format!("(distinct {left} {right})")
         }
         Expr::IsNotDistinctFrom(left, right) => {
-            let (left, right) = unordered(left, right, folding);
+            let (left, right) = compared(left, right, folding);
             format!("(not-distinct {left} {right})")
         }
         Expr::UnaryOp { op, expr } => match (op, strip_nested(expr)) {
@@ -580,10 +580,32 @@ fn is_true(expr: &Expr) -> bool {
     matches!(strip_nested(expr), Expr::Value(value) if matches!(value.value, Value::Boolean(true)))
 }
 
-fn mirrorable(left: &Expr, right: &Expr, folding: Folding) -> bool {
-    let literal = |expr: &Expr| matches!(strip_nested(expr), Expr::Value(_));
+/// Reports whether swapping `left` and `right` keeps the comparison, which fails where the left
+/// operand's collation wins and neither side is a literal.
+fn swappable(left: &Expr, right: &Expr, folding: Folding) -> bool {
     folding.collation_is_symmetric
         || literal(left)
         || literal(right)
         || meaning(left, folding) == meaning(right, folding)
+}
+
+fn literal(expr: &Expr) -> bool {
+    match strip_nested(expr) {
+        Expr::UnaryOp {
+            op: UnaryOperator::Minus | UnaryOperator::Plus,
+            expr,
+        } => literal(expr),
+        Expr::Value(_) => true,
+        _ => false,
+    }
+}
+
+/// Meaning texts of the two operands of a symmetric comparison, sorted where swapping them keeps
+/// the comparison.
+fn compared(left: &Expr, right: &Expr, folding: Folding) -> (String, String) {
+    if swappable(left, right, folding) {
+        unordered(left, right, folding)
+    } else {
+        (meaning(left, folding), meaning(right, folding))
+    }
 }

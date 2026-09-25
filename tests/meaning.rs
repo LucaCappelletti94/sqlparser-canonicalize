@@ -83,15 +83,10 @@ const BINARY: &[&str] = &[
     "IS DISTINCT FROM",
     "IS NOT DISTINCT FROM",
 ];
-const SYMMETRIC: &[&str] = &[
-    "=",
-    "!=",
-    "<=>",
-    "AND",
-    "OR",
-    "IS DISTINCT FROM",
-    "IS NOT DISTINCT FROM",
-];
+/// Comparisons whose operands swap freely where the collation of two operands does not depend
+/// on their order.
+const SYMMETRIC_COMPARISON: &[&str] =
+    &["=", "!=", "<=>", "IS DISTINCT FROM", "IS NOT DISTINCT FROM"];
 const POSTFIX: &[&str] = &[
     "IS NULL",
     "IS NOT NULL",
@@ -176,6 +171,9 @@ struct Spelling {
     flip_name_case: bool,
     flip_keyword_case: bool,
     swap_symmetric_operands: bool,
+    /// Lets `swap_symmetric_operands` swap the operands of `=` and its kin, which keeps the
+    /// comparison only where the collation of two operands does not depend on their order.
+    swap_comparison_operands: bool,
     /// Spells some casts `x::T`, which only PostgreSQL among the dialects here reads.
     double_colon_cast: bool,
     /// Flips the case of the subquery table's name, which only dialects that fold table names
@@ -228,7 +226,8 @@ fn spell(tree: &Tree, spelling: Spelling, rng: &mut Rng) -> String {
         Tree::Binary(operator, left, right) => {
             let (mut first, mut second) = (left, right);
             let mut operator = *operator;
-            let swappable = SYMMETRIC.contains(&operator)
+            let swappable = matches!(operator, "AND" | "OR")
+                || (spelling.swap_comparison_operands && SYMMETRIC_COMPARISON.contains(&operator))
                 || (spelling.swap_numeric_operands && matches!(operator, "+" | "*"));
             if (spelling.swap_symmetric_operands && swappable) && rng.percent(50) {
                 (first, second) = (second, first);
@@ -461,6 +460,7 @@ fn equivalent_spellings_agree() {
             flip_name_case: !dialect.is::<GenericDialect>(),
             flip_keyword_case: true,
             swap_symmetric_operands: true,
+            swap_comparison_operands: Folding::of(dialect).collation_is_symmetric,
             double_colon_cast: dialect.is::<PostgreSqlDialect>(),
             flip_table_case: !dialect.is::<MySqlDialect>() && !dialect.is::<GenericDialect>(),
             true_filter_synonym: Folding::of(dialect).true_is_reserved,
