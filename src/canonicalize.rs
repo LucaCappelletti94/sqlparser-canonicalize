@@ -1005,7 +1005,8 @@ fn subquery_text(
         .collect::<Result<Vec<_>, _>>()?
         .join(".");
     let mut text = format!("SELECT {items} FROM {table}");
-    if let Some(filter) = &select.selection {
+    // `WHERE TRUE` keeps every row, as a missing `WHERE` does.
+    if let Some(filter) = select.selection.as_ref().filter(|filter| !is_true(filter)) {
         text.push_str(" WHERE ");
         text.push_str(&normalize_expr_inner(filter, depth + 1, false, context)?);
     }
@@ -1211,6 +1212,15 @@ fn field_access_text(
         }
     }
     Ok(text)
+}
+
+/// Reports whether `expr` is `TRUE`, however many parentheses enclose it.
+fn is_true(expr: &Expr) -> bool {
+    match expr {
+        Expr::Nested(inner) => is_true(inner),
+        Expr::Value(value) => matches!(value.value, Value::Boolean(true)),
+        _ => false,
+    }
 }
 
 /// Reports whether `expr` is `NULL`, however many parentheses enclose it.

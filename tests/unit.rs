@@ -1,4 +1,5 @@
-use sqlparser::ast::{SetExpr, Statement};
+use sqlparser::ast::helpers::attached_token::AttachedToken;
+use sqlparser::ast::{Expr, Ident, SetExpr, Statement};
 use sqlparser::dialect::{
     AnsiDialect, BigQueryDialect, DatabricksDialect, Dialect, DuckDbDialect, GenericDialect,
     MsSqlDialect, MySqlDialect, PostgreSqlDialect, SQLiteDialect, SnowflakeDialect,
@@ -1393,4 +1394,48 @@ fn forms_no_where_clause_serves_are_refused() {
     );
     assert_unsupported(&DatabricksDialect {}, &["transform(a, x -> x + 1) = b"]);
     assert_unsupported(&SnowflakeDialect {}, &["a(+) = b"]);
+}
+
+#[test]
+fn a_subquery_filtered_by_true_is_the_unfiltered_subquery() {
+    assert_canonical(
+        &PostgreSqlDialect {},
+        &[
+            (
+                "x IN (SELECT Id FROM u WHERE TRUE)",
+                "x IN (SELECT id FROM u)",
+            ),
+            (
+                "x IN (SELECT id FROM u WHERE (TRUE))",
+                "x IN (SELECT id FROM u)",
+            ),
+            ("x IN (SELECT id FROM u)", "x IN (SELECT id FROM u)"),
+            (
+                "x IN (SELECT id FROM u WHERE FALSE)",
+                "x IN (SELECT id FROM u WHERE false)",
+            ),
+        ],
+    );
+}
+
+#[test]
+fn a_caller_built_form_no_predicate_holds_is_refused() {
+    let name = || Box::new(Expr::Identifier(Ident::new("a")));
+    for expr in [
+        Expr::Wildcard(AttachedToken::empty()),
+        Expr::Prior(name()),
+        Expr::GroupingSets(vec![vec![*name()]]),
+        Expr::Named {
+            expr: name(),
+            name: Ident::new("b"),
+        },
+    ] {
+        assert!(
+            matches!(
+                Canonicalizer::new(&PostgreSqlDialect {}).normalize_where_clause(Some(&expr)),
+                Err(CanonicalizeError::Unsupported(_))
+            ),
+            "{expr:?}"
+        );
+    }
 }

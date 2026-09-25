@@ -3,7 +3,8 @@
 //! Two expressions with the same meaning text are the same predicate under every equivalence
 //! the canonicalizer promises: redundant parentheses, the dialect's name folding, the order of
 //! operands and items it treats as unordered, and synonyms such as `SOME` for `ANY`, `x::T` for
-//! `CAST(x AS T)` and a missing `ELSE` for `ELSE NULL`.
+//! `CAST(x AS T)`, a missing `ELSE` for `ELSE NULL`, and a subquery without `WHERE` for one
+//! filtered by `TRUE`.
 //! Anything else keeps its structure.
 
 use sqlparser::ast::{
@@ -517,9 +518,11 @@ fn query_meaning(query: &Query, folding: Folding) -> String {
             )
         })
         .collect();
+    // `WHERE TRUE` keeps every row, as a missing `WHERE` does.
     let filter = select
         .selection
         .as_ref()
+        .filter(|filter| !is_true(filter))
         .map(|filter| meaning(filter, folding));
     format!(
         "(select [{}] {} {filter:?})",
@@ -533,4 +536,8 @@ fn strip_nested(expr: &Expr) -> &Expr {
         Expr::Nested(inner) => strip_nested(inner),
         expr => expr,
     }
+}
+
+fn is_true(expr: &Expr) -> bool {
+    matches!(strip_nested(expr), Expr::Value(value) if matches!(value.value, Value::Boolean(true)))
 }
