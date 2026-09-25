@@ -1415,6 +1415,19 @@ fn a_list_never_opens_with_an_item_read_as_a_query() {
                 "x IN (((SELECT a FROM o)[1]), (SELECT b FROM o))",
                 "x IN (((SELECT a FROM o)[1]), (SELECT b FROM o))",
             ),
+            (
+                "x NOT IN (3, 2, (SELECT a FROM o))",
+                "x NOT IN (2, (SELECT a FROM o), 3)",
+            ),
+            // A list whose sorted head already reads as an item keeps its order and spelling.
+            (
+                "x IN (1, (SELECT b FROM o), 'a')",
+                "x IN ('a', (SELECT b FROM o), 1)",
+            ),
+            (
+                "x IN (((SELECT a FROM o)[1]), 'a')",
+                "x IN ('a', (SELECT a FROM o)[1])",
+            ),
         ],
     );
 }
@@ -1431,6 +1444,8 @@ fn subqueries_outside_the_served_shape_are_refused() {
             "x IN (SELECT DISTINCT a FROM u)",
             "x IN (SELECT a AS b FROM u)",
             "x IN (SELECT a FROM u AS v (b))",
+            "x IN (SELECT a FROM generate_series(1, 3))",
+            "x IN (SELECT a FROM u TABLESAMPLE BERNOULLI (10))",
             "x IN (SELECT a FROM u JOIN v ON u.a = v.a)",
             "x IN (SELECT a FROM u UNION SELECT a FROM v)",
             "EXISTS (SELECT u.* FROM u)",

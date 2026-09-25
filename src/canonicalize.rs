@@ -426,22 +426,18 @@ fn normalize_expr_inner(
             list,
             negated,
         } => {
-            // sqlparser reads a list that opens with a query as `IN (query)` and does not take
-            // that back, so a bare subquery, which no parentheses can hide, goes last.
-            let mut items: Vec<(bool, String)> = list
+            let mut items: Vec<String> = list
                 .iter()
-                .map(|item| {
-                    let item = normalize_expr_inner(item, depth + 1, true, context)?;
-                    Ok(list_item(item, context))
-                })
-                .collect::<Result<_, CanonicalizeError>>()?;
+                .map(|item| normalize_expr_inner(item, depth + 1, true, context))
+                .collect::<Result<_, _>>()?;
             items.sort();
+            open_list(&mut items, context);
             let not = if *negated { "NOT " } else { "" };
             let mut text = format!(
                 "{} {not}IN (",
                 normalize_expr_inner(expr, depth + 1, true, context)?
             );
-            for (index, (_, item)) in items.iter().enumerate() {
+            for (index, item) in items.iter().enumerate() {
                 if index > 0 {
                     text.push_str(", ");
                 }
@@ -983,28 +979,44 @@ fn qualified_name_text<'i>(
         .join("."))
 }
 
-/// Spells a list item so that it reads back as an item wherever sorting puts it, paired with
-/// whether it still starts with a query and so must not come first.
+/// Moves to the head of a sorted `IN` list the first item that can stand there.
 ///
-/// Enclosing hides a query that only starts the item, as in `(SELECT a FROM u)[1]`. A bare
-/// subquery keeps its query first however many parentheses enclose it.
-fn list_item(item: String, context: &Canonicalizer<'_>) -> (bool, String) {
-    if !starts_with_query(&item, context) {
-        return (false, item);
+/// sqlparser reads a list that opens with a query as `IN (query)` and does not take that back.
+/// Enclosing hides a query that only starts an item, as in `(SELECT a FROM u)[1]`, and a bare
+/// subquery keeps its query first however many parentheses enclose it. Every other item keeps
+/// its sorted place, and a list whose items all start with a query fails to read back.
+fn open_list(items: &mut [String], context: &Canonicalizer<'_>) {
+    if items
+        .first()
+        .is_none_or(|head| !starts_with_query(head, context))
+    {
+        return;
     }
-    let enclosed = format!("({item})");
-    if starts_with_query(&enclosed, context) {
-        (true, item)
-    } else {
-        (false, enclosed)
+    let head = items.iter_mut().position(|item| {
+        if !starts_with_query(item, context) {
+            return true;
+        }
+        let enclosed = format!("({item})");
+        let can_lead = !starts_with_query(&enclosed, context);
+        if can_lead {
+            *item = enclosed;
+        }
+        can_lead
+    });
+    if let Some(head) = head {
+        items[..=head].rotate_right(1);
     }
 }
 
 /// Reports whether sqlparser reads a query at the start of `text`, as it tries to at the start
-/// of an `IN` list. A query starts with a parenthesis or a keyword, so a literal or a quoted
-/// name is answered without parsing.
+/// of an `IN` list. A query starts with a parenthesis or a keyword, so any other text is
+/// answered without parsing.
 fn starts_with_query(text: &str, context: &Canonicalizer<'_>) -> bool {
-    text.starts_with(|first: char| first == '(' || first.is_ascii_alphabetic())
+    let first_word = text
+        .split(|character: char| !(character.is_ascii_alphanumeric() || character == '_'))
+        .next()
+        .unwrap_or_default();
+    (text.starts_with('(') || is_keyword(first_word))
         && Parser::new(context.dialect)
             .try_with_sql(text)
             .and_then(|mut parser| parser.parse_query())

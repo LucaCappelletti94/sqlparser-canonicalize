@@ -913,6 +913,24 @@ const GOLDENS: &[Golden] = &[
         normalized: "NOT EXISTS (SELECT 1 FROM orders WHERE (owner = id))",
         hash: 36450148689480009697569547122790864796,
     },
+    Golden {
+        dialect: DialectKind::PostgreSql,
+        sql: "SELECT * FROM docs WHERE EXISTS (SELECT 1 FROM Shares AS S WHERE S.doc_id = docs.id)",
+        normalized: "EXISTS (SELECT 1 FROM shares s WHERE (docs.id = s.doc_id))",
+        hash: 14807432777728440388075203346013765724,
+    },
+    Golden {
+        dialect: DialectKind::MySql,
+        sql: "SELECT * FROM t WHERE x IN (SELECT a FROM m AS V)",
+        normalized: "x IN (SELECT a FROM m V)",
+        hash: 273400758536552858398955164991264260047,
+    },
+    Golden {
+        dialect: DialectKind::PostgreSql,
+        sql: "SELECT * FROM t WHERE amount IN (1, ((SELECT amount FROM orders)))",
+        normalized: "amount IN (1, (SELECT amount FROM orders))",
+        hash: 272223159844162993213568602930665551268,
+    },
 ];
 
 fn normalize_with_dialect(sql: &str, dialect: DialectKind) -> String {
