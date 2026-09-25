@@ -184,7 +184,8 @@ struct Spelling {
     /// Spells a missing subquery filter as `WHERE TRUE` at times, which is the same filter only
     /// where `TRUE` is reserved.
     true_filter_synonym: bool,
-    /// Writes `b > a` for `a < b` at times, which every dialect reads as one comparison.
+    /// Writes `b > a` for `a < b` at times, which is one comparison where the collation of two
+    /// operands does not depend on their order.
     mirror_comparisons: bool,
     /// Swaps the operands of `+` and `*` at times, which is the same value only where `+` is
     /// numeric.
@@ -463,7 +464,7 @@ fn equivalent_spellings_agree() {
             double_colon_cast: dialect.is::<PostgreSqlDialect>(),
             flip_table_case: !dialect.is::<MySqlDialect>() && !dialect.is::<GenericDialect>(),
             true_filter_synonym: Folding::of(dialect).true_is_reserved,
-            mirror_comparisons: true,
+            mirror_comparisons: Folding::of(dialect).collation_is_symmetric,
             swap_numeric_operands: Folding::of(dialect).plus_is_numeric,
         };
         for seed in 0..SEEDS {

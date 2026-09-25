@@ -30,6 +30,7 @@ pub struct Folding {
     pub qualifier: Fold,
     pub true_is_reserved: bool,
     pub plus_is_numeric: bool,
+    pub collation_is_symmetric: bool,
 }
 
 impl Folding {
@@ -56,6 +57,8 @@ impl Folding {
             qualifier,
             true_is_reserved,
             plus_is_numeric,
+            // SQLite compares two columns under the left one's collation.
+            collation_is_symmetric: true_is_reserved,
         }
     }
 }
@@ -127,17 +130,20 @@ pub fn meaning(expr: &Expr, folding: Folding) -> String {
             let (left, right) = unordered(left, right, folding);
             format!("({op} {left} {right})")
         }
-        // `a > b` and `b < a` are one comparison.
+        // `a > b` and `b < a` are one comparison wherever the operands' collation does not depend
+        // on their order.
         Expr::BinaryOp {
             left,
-            op: BinaryOperator::Gt,
+            op: op @ (BinaryOperator::Gt | BinaryOperator::GtEq),
             right,
-        } => format!("(< {} {})", m(right), m(left)),
-        Expr::BinaryOp {
-            left,
-            op: BinaryOperator::GtEq,
-            right,
-        } => format!("(<= {} {})", m(right), m(left)),
+        } if mirrorable(left, right, folding) => {
+            let mirrored = if matches!(op, BinaryOperator::Gt) {
+                "<"
+            } else {
+                "<="
+            };
+            format!("({mirrored} {} {})", m(right), m(left))
+        }
         Expr::BinaryOp { left, op, right }
             if folding.plus_is_numeric
                 && matches!(op, BinaryOperator::Plus | BinaryOperator::Multiply) =>
@@ -572,4 +578,12 @@ fn strip_nested(expr: &Expr) -> &Expr {
 
 fn is_true(expr: &Expr) -> bool {
     matches!(strip_nested(expr), Expr::Value(value) if matches!(value.value, Value::Boolean(true)))
+}
+
+fn mirrorable(left: &Expr, right: &Expr, folding: Folding) -> bool {
+    let literal = |expr: &Expr| matches!(strip_nested(expr), Expr::Value(_));
+    folding.collation_is_symmetric
+        || literal(left)
+        || literal(right)
+        || meaning(left, folding) == meaning(right, folding)
 }

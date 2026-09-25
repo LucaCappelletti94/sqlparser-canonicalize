@@ -1504,8 +1504,24 @@ fn mirrored_comparisons_share_a_key() {
         ("b >= (b)", "(b <= b)"),
     ];
     assert_canonical(&PostgreSqlDialect {}, &cases);
-    // `a > b` and `b < a` agree even when either side is NULL, so every dialect mirrors.
-    assert_canonical(&GenericDialect {}, &[("b > a", "(a < b)")]);
+}
+
+#[test]
+fn comparisons_between_two_columns_keep_their_order_where_the_left_collation_wins() {
+    // SQLite compares two columns under the left one's collation, so `b > a` and `a < b` can
+    // differ. Against a literal the column's collation applies on either side.
+    for dialect in [&SQLiteDialect {} as &dyn Dialect, &GenericDialect {}] {
+        assert_canonical(
+            dialect,
+            &[
+                ("b > a", "(b > a)"),
+                ("a < b", "(a < b)"),
+                ("age > 18", "(18 < age)"),
+                ("18 < age", "(18 < age)"),
+                ("b > b", "(b < b)"),
+            ],
+        );
+    }
 }
 
 #[test]

@@ -682,8 +682,8 @@ const GOLDENS: &[Golden] = &[
     Golden {
         dialect: DialectKind::SQLite,
         sql: "SELECT * FROM t WHERE b < a",
-        normalized: "(a > b)",
-        hash: 204201253671108966590160388409485334977,
+        normalized: "(b < a)",
+        hash: 164195086123485964968356541696287096375,
     },
     Golden {
         dialect: DialectKind::SQLite,

@@ -822,14 +822,17 @@ fn infix_text(
     depth: usize,
     context: &Canonicalizer<'_>,
 ) -> Result<String, CanonicalizeError> {
+    // Where the left operand's collation wins, as in SQLite, two operands may only swap when
+    // one of them is a literal, which has no collation of its own.
+    let swappable = context.collation_is_symmetric || is_literal(left) || is_literal(right);
     let left = normalize_expr_inner(left, depth + 1, true, context)?;
     let right = normalize_expr_inner(right, depth + 1, true, context)?;
     let (left, operator, right) = match order {
         OperandOrder::Sorted if left > right => (right, operator, left),
         // Equal operands take whichever of the two operators sorts first, so `b > b` and
-        // `b < b` share one spelling.
+        // `b < b` share one spelling, which holds under any collation.
         OperandOrder::Mirrored(mirrored)
-            if left > right || (left == right && mirrored < operator) =>
+            if (swappable && left > right) || (left == right && mirrored < operator) =>
         {
             (right, mirrored, left)
         }
@@ -1257,6 +1260,15 @@ fn literal_access() -> CanonicalizeError {
     CanonicalizeError::Unsupported("A field access on a literal is not supported".to_string())
 }
 
+/// Reports whether `expr` is a literal, however many parentheses enclose it.
+fn is_literal(expr: &Expr) -> bool {
+    match expr {
+        Expr::Nested(inner) => is_literal(inner),
+        Expr::Value(_) => true,
+        _ => false,
+    }
+}
+
 /// Reports whether `expr` is `TRUE`, however many parentheses enclose it.
 fn is_true(expr: &Expr) -> bool {
     match expr {
@@ -1395,6 +1407,8 @@ pub struct Canonicalizer<'a> {
     true_is_reserved: bool,
     /// Whether `+` only adds numbers, so `a + b` and `b + a` are one value.
     plus_is_numeric: bool,
+    /// Whether comparing two operands uses the same collation in either order.
+    collation_is_symmetric: bool,
 }
 
 impl<'a> Canonicalizer<'a> {
@@ -1421,12 +1435,16 @@ impl<'a> Canonicalizer<'a> {
             || dialect.is::<MySqlDialect>()
             || dialect.is::<AnsiDialect>();
         let plus_is_numeric = true_is_reserved || dialect.is::<SQLiteDialect>();
+        // PostgreSQL, MySQL and ANSI reject two conflicting implicit collations in either order,
+        // while SQLite takes the left operand's.
+        let collation_is_symmetric = true_is_reserved;
         Self {
             dialect,
             folding,
             qualifier_folding,
             true_is_reserved,
             plus_is_numeric,
+            collation_is_symmetric,
         }
     }
 }
