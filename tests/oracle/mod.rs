@@ -1,10 +1,11 @@
 //! What a predicate means, written independently of the canonicalizer.
 //!
 //! Two expressions with the same meaning text are the same predicate under every equivalence
-//! the canonicalizer promises: redundant parentheses, the dialect's name folding, and the order
-//! of operands and items it treats as unordered. Anything else keeps its structure.
+//! the canonicalizer promises: redundant parentheses, the dialect's name folding, the order of
+//! operands and items it treats as unordered, and keyword synonyms such as `SOME` for `ANY`.
+//! Anything else keeps its structure.
 
-use sqlparser::ast::{BinaryOperator, Expr, Ident};
+use sqlparser::ast::{BinaryOperator, Expr, Ident, ObjectName};
 use sqlparser::dialect::{AnsiDialect, Dialect, MySqlDialect, PostgreSqlDialect, SQLiteDialect};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -146,26 +147,107 @@ pub fn meaning(expr: &Expr, folding: Folding) -> String {
         } => format!("(between {negated} {} {} {})", m(expr), m(low), m(high)),
         Expr::Like {
             negated,
+            any,
             expr,
             pattern,
             escape_char,
-            ..
         } => format!(
-            "(like {negated} {} {} {escape_char:?})",
+            "(like {negated} {any} {} {} {:?})",
             m(expr),
-            m(pattern)
+            m(pattern),
+            escape_char.as_deref().map(m)
         ),
         Expr::ILike {
+            negated,
+            any,
+            expr,
+            pattern,
+            escape_char,
+        } => format!(
+            "(ilike {negated} {any} {} {} {:?})",
+            m(expr),
+            m(pattern),
+            escape_char.as_deref().map(m)
+        ),
+        Expr::SimilarTo {
             negated,
             expr,
             pattern,
             escape_char,
+        } => {
+            let escape = escape_char.as_deref().map(m);
+            format!("(similar {negated} {} {} {escape:?})", m(expr), m(pattern))
+        }
+        // `REGEXP` and `RLIKE` are one operator.
+        Expr::RLike {
+            negated,
+            expr,
+            pattern,
             ..
-        } => format!(
-            "(ilike {negated} {} {} {escape_char:?})",
-            m(expr),
-            m(pattern)
-        ),
+        } => format!("(rlike {negated} {} {})", m(expr), m(pattern)),
+        // `SOME` and `ANY` are one quantifier.
+        Expr::AnyOp {
+            left,
+            compare_op,
+            right,
+            ..
+        } => format!("(any {compare_op} {} {})", m(left), m(right)),
+        Expr::AllOp {
+            left,
+            compare_op,
+            right,
+        } => format!("(all {compare_op} {} {})", m(left), m(right)),
+        Expr::IsJson {
+            expr,
+            kind,
+            unique_keys,
+            negated,
+        } => format!("(is-json {negated} {} {kind:?} {unique_keys:?})", m(expr)),
+        Expr::IsNormalized {
+            expr,
+            form,
+            negated,
+        } => format!("(is-normalized {negated} {} {form:?})", m(expr)),
+        Expr::MemberOf(member) => {
+            format!("(member-of {} {})", m(&member.value), m(&member.array))
+        }
+        Expr::AtTimeZone {
+            timestamp,
+            time_zone,
+        } => format!("(at-time-zone {} {})", m(timestamp), m(time_zone)),
+        Expr::Collate { expr, collation } => format!("(collate {} {collation})", m(expr)),
+        Expr::MatchAgainst {
+            columns,
+            match_value,
+            opt_search_modifier,
+        } => {
+            let columns: Vec<String> = columns
+                .iter()
+                .map(|column| object_name(column, folding))
+                .collect();
+            format!(
+                "(match [{}] {match_value} {opt_search_modifier:?})",
+                columns.join(" ")
+            )
+        }
         other => format!("{other}"),
     }
+}
+
+fn object_name(name: &ObjectName, folding: Folding) -> String {
+    let last = name.0.len().saturating_sub(1);
+    name.0
+        .iter()
+        .enumerate()
+        .map(|(index, part)| {
+            let fold = if index == last {
+                folding.column
+            } else {
+                folding.qualifier
+            };
+            part.as_ident()
+                .map_or_else(|| part.to_string(), |ident| self::name(ident, fold))
+        })
+        .collect::<Vec<_>>()
+        .join(".")
 }
