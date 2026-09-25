@@ -238,14 +238,14 @@ const GOLDENS: &[Golden] = &[
     Golden {
         dialect: DialectKind::PostgreSql,
         sql: "SELECT * FROM t WHERE x IN (SELECT id FROM m WHERE owner = 'a')",
-        normalized: "x IN (SELECT id FROM m WHERE owner = 'a')",
-        hash: 266372329322768390664236543868795251272,
+        normalized: "x IN (SELECT id FROM m WHERE ('a' = owner))",
+        hash: 278058222354865618142828421867605410868,
     },
     Golden {
         dialect: DialectKind::PostgreSql,
         sql: "SELECT * FROM t WHERE x NOT IN (SELECT id FROM m WHERE owner = 'a')",
-        normalized: "x NOT IN (SELECT id FROM m WHERE owner = 'a')",
-        hash: 47926754135670659209261765469698082688,
+        normalized: "x NOT IN (SELECT id FROM m WHERE ('a' = owner))",
+        hash: 101089862008503157561429321991088829490,
     },
     Golden {
         dialect: DialectKind::PostgreSql,
@@ -502,14 +502,14 @@ const GOLDENS: &[Golden] = &[
     Golden {
         dialect: DialectKind::MySql,
         sql: "SELECT * FROM t WHERE x IN (SELECT id FROM m WHERE owner = 'a')",
-        normalized: "x IN (SELECT id FROM m WHERE owner = 'a')",
-        hash: 266372329322768390664236543868795251272,
+        normalized: "x IN (SELECT id FROM m WHERE ('a' = owner))",
+        hash: 278058222354865618142828421867605410868,
     },
     Golden {
         dialect: DialectKind::MySql,
         sql: "SELECT * FROM t WHERE x NOT IN (SELECT id FROM m WHERE owner = 'a')",
-        normalized: "x NOT IN (SELECT id FROM m WHERE owner = 'a')",
-        hash: 47926754135670659209261765469698082688,
+        normalized: "x NOT IN (SELECT id FROM m WHERE ('a' = owner))",
+        hash: 101089862008503157561429321991088829490,
     },
     Golden {
         dialect: DialectKind::MySql,
@@ -772,14 +772,14 @@ const GOLDENS: &[Golden] = &[
     Golden {
         dialect: DialectKind::SQLite,
         sql: "SELECT * FROM t WHERE x IN (SELECT id FROM m WHERE owner = 'a')",
-        normalized: "x IN (SELECT id FROM m WHERE owner = 'a')",
-        hash: 266372329322768390664236543868795251272,
+        normalized: "x IN (SELECT id FROM m WHERE ('a' = owner))",
+        hash: 278058222354865618142828421867605410868,
     },
     Golden {
         dialect: DialectKind::SQLite,
         sql: "SELECT * FROM t WHERE x NOT IN (SELECT id FROM m WHERE owner = 'a')",
-        normalized: "x NOT IN (SELECT id FROM m WHERE owner = 'a')",
-        hash: 47926754135670659209261765469698082688,
+        normalized: "x NOT IN (SELECT id FROM m WHERE ('a' = owner))",
+        hash: 101089862008503157561429321991088829490,
     },
     Golden {
         dialect: DialectKind::SQLite,
@@ -894,6 +894,24 @@ const GOLDENS: &[Golden] = &[
         sql: "SELECT * FROM t WHERE SUBSTR(Code, 1, 2) = 'ab'",
         normalized: "('ab' = SUBSTR(code, 1, 2))",
         hash: 69633333979695294109422699580078467064,
+    },
+    Golden {
+        dialect: DialectKind::PostgreSql,
+        sql: "SELECT * FROM t WHERE EXISTS (SELECT * FROM Orders WHERE Orders.Owner = t.Id)",
+        normalized: "EXISTS (SELECT * FROM orders WHERE (orders.owner = t.id))",
+        hash: 225956965931835869503995965403457904073,
+    },
+    Golden {
+        dialect: DialectKind::MySql,
+        sql: "SELECT * FROM t WHERE Total > (SELECT AVG(Total) FROM Orders)",
+        normalized: "(total > (SELECT avg(total) FROM Orders))",
+        hash: 96598733493784093888332517147938748021,
+    },
+    Golden {
+        dialect: DialectKind::SQLite,
+        sql: "SELECT * FROM t WHERE NOT EXISTS (SELECT 1 FROM Orders WHERE Owner = Id)",
+        normalized: "NOT EXISTS (SELECT 1 FROM orders WHERE (id = owner))",
+        hash: 156233626803291239004552294045161112178,
     },
 ];
 

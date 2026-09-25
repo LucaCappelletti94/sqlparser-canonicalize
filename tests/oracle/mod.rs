@@ -3,12 +3,14 @@
 //! Two expressions with the same meaning text are the same predicate under every equivalence
 //! the canonicalizer promises: redundant parentheses, the dialect's name folding, the order of
 //! operands and items it treats as unordered, and synonyms such as `SOME` for `ANY`, `x::T` for
-//! `CAST(x AS T)` and a missing `ELSE` for `ELSE NULL`.
+//! `CAST(x AS T)`, a missing `ELSE` for `ELSE NULL`, and a subquery without `WHERE` for one
+//! filtered by `TRUE`.
 //! Anything else keeps its structure.
 
 use sqlparser::ast::{
     AccessExpr, BinaryOperator, CastKind, CeilFloorKind, Expr, FunctionArg, FunctionArgExpr,
-    FunctionArguments, Ident, ObjectName, Subscript, Value,
+    FunctionArguments, GroupByExpr, Ident, ObjectName, Query, SelectItem, SetExpr, Subscript,
+    TableFactor, UnaryOperator, Value,
 };
 use sqlparser::dialect::{AnsiDialect, Dialect, MySqlDialect, PostgreSqlDialect, SQLiteDialect};
 
@@ -120,7 +122,17 @@ pub fn meaning(expr: &Expr, folding: Folding) -> String {
             let (left, right) = unordered(left, right, folding);
             format!("(not-distinct {left} {right})")
         }
-        Expr::UnaryOp { op, expr } => format!("({op} {})", m(expr)),
+        Expr::UnaryOp { op, expr } => match (op, strip_nested(expr)) {
+            // `NOT (EXISTS q)` and `NOT EXISTS q` are one test.
+            (
+                UnaryOperator::Not,
+                Expr::Exists {
+                    subquery,
+                    negated: false,
+                },
+            ) => format!("(exists true {})", query_meaning(subquery, folding)),
+            _ => format!("({op} {})", m(expr)),
+        },
         Expr::IsNull(expr) => format!("(is-null {})", m(expr)),
         Expr::IsNotNull(expr) => format!("(is-not-null {})", m(expr)),
         Expr::IsTrue(expr) => format!("(is-true {})", m(expr)),
@@ -142,7 +154,15 @@ pub fn meaning(expr: &Expr, folding: Folding) -> String {
             expr,
             subquery,
             negated,
-        } => format!("(in-subquery {negated} {} {subquery})", m(expr)),
+        } => format!(
+            "(in-subquery {negated} {} {})",
+            m(expr),
+            query_meaning(subquery, folding)
+        ),
+        Expr::Exists { subquery, negated } => {
+            format!("(exists {negated} {})", query_meaning(subquery, folding))
+        }
+        Expr::Subquery(query) => format!("(subquery {})", query_meaning(query, folding)),
         Expr::Between {
             expr,
             negated,
@@ -235,7 +255,13 @@ pub fn meaning(expr: &Expr, folding: Folding) -> String {
             )
         }
         Expr::Function(function) => {
-            let name = object_name(&function.name, folding);
+            // A quoted function name is another lookup in MySQL, so the oracle never merges it
+            // with the bare spelling.
+            let quoted = function.name.0.iter().any(|part| {
+                part.as_ident()
+                    .is_some_and(|ident| ident.quote_style.is_some())
+            });
+            let name = format!("{quoted}:{}", object_name(&function.name, folding));
             let plain = function.filter.is_none()
                 && function.over.is_none()
                 && function.within_group.is_empty()
@@ -450,4 +476,68 @@ fn is_name(expr: &Expr) -> bool {
         Expr::Identifier(_) | Expr::CompoundIdentifier(_) => true,
         _ => false,
     }
+}
+
+/// Meaning of a subquery in the shape the canonicalizer serves, and its printed text otherwise.
+fn query_meaning(query: &Query, folding: Folding) -> String {
+    let SetExpr::Select(select) = query.body.as_ref() else {
+        return query.to_string();
+    };
+    let simple = query.with.is_none()
+        && query.order_by.is_none()
+        && query.limit_clause.is_none()
+        && select.distinct.is_none()
+        && select.having.is_none()
+        && matches!(&select.group_by, GroupByExpr::Expressions(exprs, _) if exprs.is_empty())
+        && select.from.len() == 1
+        && select.from[0].joins.is_empty();
+    if !simple {
+        return query.to_string();
+    }
+    let TableFactor::Table {
+        name, alias: None, ..
+    } = &select.from[0].relation
+    else {
+        return query.to_string();
+    };
+    let items: Vec<String> = select
+        .projection
+        .iter()
+        .map(|item| match item {
+            SelectItem::UnnamedExpr(expr) => meaning(expr, folding),
+            other => other.to_string(),
+        })
+        .collect();
+    let table: Vec<String> = name
+        .0
+        .iter()
+        .map(|part| {
+            part.as_ident().map_or_else(
+                || part.to_string(),
+                |ident| self::name(ident, folding.qualifier),
+            )
+        })
+        .collect();
+    // `WHERE TRUE` keeps every row, as a missing `WHERE` does.
+    let filter = select
+        .selection
+        .as_ref()
+        .filter(|filter| !is_true(filter))
+        .map(|filter| meaning(filter, folding));
+    format!(
+        "(select [{}] {} {filter:?})",
+        items.join(" "),
+        table.join(".")
+    )
+}
+
+fn strip_nested(expr: &Expr) -> &Expr {
+    match expr {
+        Expr::Nested(inner) => strip_nested(inner),
+        expr => expr,
+    }
+}
+
+fn is_true(expr: &Expr) -> bool {
+    matches!(strip_nested(expr), Expr::Value(value) if matches!(value.value, Value::Boolean(true)))
 }

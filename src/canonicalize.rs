@@ -7,9 +7,9 @@ use core::hash::{Hash, Hasher};
 use seahash::SeaHasher;
 use sqlparser::ast::{
     AccessExpr, BinaryOperator, CastKind, CeilFloorKind, DateTimeField, Distinct, Expr,
-    ExtractSyntax, Function, FunctionArg, FunctionArgExpr, FunctionArguments, Ident, Interval,
-    LimitClause, ObjectName, Query, Select, SelectModifiers, SetExpr, Statement, Subscript,
-    TableFactor, UnaryOperator, Value,
+    ExtractSyntax, Function, FunctionArg, FunctionArgExpr, FunctionArguments, GroupByExpr, Ident,
+    Interval, LimitClause, ObjectName, Query, Select, SelectItem, SelectModifiers, SetExpr,
+    Statement, Subscript, TableFactor, UnaryOperator, Value,
 };
 use sqlparser::dialect::{AnsiDialect, Dialect, MySqlDialect, PostgreSqlDialect, SQLiteDialect};
 use sqlparser::keywords::ALL_KEYWORDS;
@@ -427,10 +427,16 @@ fn normalize_expr_inner(
         } => {
             let not = if *negated { "NOT " } else { "" };
             format!(
-                "{} {not}IN ({subquery})",
-                normalize_expr_inner(expr, depth + 1, true, context)?
+                "{} {not}IN ({})",
+                normalize_expr_inner(expr, depth + 1, true, context)?,
+                subquery_text(subquery, depth, context)?
             )
         }
+        Expr::Exists { subquery, negated } => {
+            let not = if *negated { "NOT " } else { "" };
+            format!("{not}EXISTS ({})", subquery_text(subquery, depth, context)?)
+        }
+        Expr::Subquery(query) => format!("({})", subquery_text(query, depth, context)?),
         Expr::Between {
             expr,
             low,
@@ -756,7 +762,19 @@ fn normalize_expr_inner(
         Expr::CompoundFieldAccess { root, access_chain } => {
             field_access_text(root, access_chain, depth, context)?
         }
-        _ => format!("{expr}"),
+        // Named statically, because printing an unbounded tree can be slow in sqlparser.
+        Expr::InUnnest { .. } => return Err(refused("IN UNNEST")),
+        Expr::Struct { .. } => return Err(refused("STRUCT")),
+        Expr::Named { .. } => return Err(refused("a named expression")),
+        Expr::Dictionary(_) => return Err(refused("a dictionary literal")),
+        Expr::Map(_) => return Err(refused("a map literal")),
+        Expr::Lambda(_) => return Err(refused("a lambda")),
+        Expr::OuterJoin(_) => return Err(refused("the (+) outer join marker")),
+        Expr::Prior(_) => return Err(refused("PRIOR")),
+        Expr::GroupingSets(_) | Expr::Cube(_) | Expr::Rollup(_) => {
+            return Err(refused("a grouping set"));
+        }
+        Expr::Wildcard(_) | Expr::QualifiedWildcard(..) => return Err(refused("a wildcard")),
     };
     Ok(if tight_parent && !encloses_itself(expr) {
         format!("({text})")
@@ -908,6 +926,91 @@ fn qualified_name_text<'i>(
         })
         .collect::<Result<Vec<_>, _>>()?
         .join("."))
+}
+
+/// The error for an expression form no `WHERE` clause of a served query can hold.
+fn refused(form: &str) -> CanonicalizeError {
+    CanonicalizeError::Unsupported(format!("{form} is not supported in a predicate"))
+}
+
+/// Spells a subquery in the shape the crate serves, `SELECT items FROM table [WHERE filter]`.
+///
+/// Inside a subquery, grouping, ordering and aliases change which rows the outer predicate
+/// sees, so they are refused along with every clause an outer query may not carry.
+fn subquery_text(
+    query: &Query,
+    depth: usize,
+    context: &Canonicalizer<'_>,
+) -> Result<String, CanonicalizeError> {
+    let unsupported = |part: &str| {
+        CanonicalizeError::Unsupported(format!("{part} in a subquery is not supported"))
+    };
+    let select = single_table_select(query)?;
+    if query.order_by.is_some() {
+        return Err(unsupported("ORDER BY"));
+    }
+    if !matches!(&select.group_by, GroupByExpr::Expressions(exprs, modifiers) if exprs.is_empty() && modifiers.is_empty())
+    {
+        return Err(unsupported("GROUP BY"));
+    }
+    if select.having.is_some() {
+        return Err(unsupported("HAVING"));
+    }
+    let TableFactor::Table {
+        name,
+        alias: None,
+        args: None,
+        with_hints,
+        version: None,
+        with_ordinality: false,
+        partitions,
+        json_path: None,
+        sample: None,
+        index_hints,
+    } = &select.from[0].relation
+    else {
+        return Err(unsupported("a table alias or table option"));
+    };
+    if !with_hints.is_empty() || !partitions.is_empty() || !index_hints.is_empty() {
+        return Err(unsupported("a table hint"));
+    }
+    let items = select
+        .projection
+        .iter()
+        .map(|item| match item {
+            SelectItem::UnnamedExpr(expr) => normalize_expr_inner(expr, depth + 1, false, context),
+            SelectItem::Wildcard(options)
+                if options.opt_ilike.is_none()
+                    && options.opt_exclude.is_none()
+                    && options.opt_except.is_none()
+                    && options.opt_replace.is_none()
+                    && options.opt_rename.is_none()
+                    && options.opt_alias.is_none() =>
+            {
+                Ok("*".to_string())
+            }
+            _ => Err(unsupported("an alias or qualified wildcard")),
+        })
+        .collect::<Result<Vec<_>, _>>()?
+        .join(", ");
+    let table = name
+        .0
+        .iter()
+        .map(|part| match part.as_ident() {
+            Some(part) => {
+                identifier_text(part, context.qualifier_folding, NamePlace::Operand, context)
+            }
+            None => Err(unsupported("a computed table name")),
+        })
+        .collect::<Result<Vec<_>, _>>()?
+        .join(".");
+    let mut text = format!("SELECT {items} FROM {table}");
+    // `WHERE TRUE` keeps every row, as a missing `WHERE` does.
+    if let Some(filter) = select.selection.as_ref().filter(|filter| !is_true(filter)) {
+        text.push_str(" WHERE ");
+        text.push_str(&normalize_expr_inner(filter, depth + 1, false, context)?);
+    }
+    Ok(text)
 }
 
 /// Spells a plain call, refusing the aggregate and window forms no `WHERE` clause can hold.
@@ -1109,6 +1212,15 @@ fn field_access_text(
         }
     }
     Ok(text)
+}
+
+/// Reports whether `expr` is `TRUE`, however many parentheses enclose it.
+fn is_true(expr: &Expr) -> bool {
+    match expr {
+        Expr::Nested(inner) => is_true(inner),
+        Expr::Value(value) => matches!(value.value, Value::Boolean(true)),
+        _ => false,
+    }
 }
 
 /// Reports whether `expr` is `NULL`, however many parentheses enclose it.

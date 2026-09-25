@@ -1,7 +1,8 @@
-use sqlparser::ast::{SetExpr, Statement};
+use sqlparser::ast::helpers::attached_token::AttachedToken;
+use sqlparser::ast::{Expr, Ident, SetExpr, Statement};
 use sqlparser::dialect::{
-    AnsiDialect, BigQueryDialect, Dialect, DuckDbDialect, GenericDialect, MsSqlDialect,
-    MySqlDialect, PostgreSqlDialect, SQLiteDialect, SnowflakeDialect,
+    AnsiDialect, BigQueryDialect, DatabricksDialect, Dialect, DuckDbDialect, GenericDialect,
+    MsSqlDialect, MySqlDialect, PostgreSqlDialect, SQLiteDialect, SnowflakeDialect,
 };
 use sqlparser::parser::Parser;
 use sqlparser_canonicalize::{CanonicalizeError, Canonicalizer, hash_canonical};
@@ -82,9 +83,10 @@ fn a_membership_term_normalizes_the_same_under_two_spellings() {
 #[test]
 fn two_different_membership_terms_are_two_predicates() {
     let dialect = PostgreSqlDialect {};
-    let norm = |sql: &str| Canonicalizer::new(&dialect).normalize_sql(sql).unwrap();
+    let norm = |sql: &str| Canonicalizer::new(&dialect).normalize_sql(sql);
 
     let base = norm("SELECT * FROM t WHERE x IN (SELECT id FROM m WHERE owner = 'a')");
+    assert!(base.is_ok());
 
     for other in [
         "SELECT * FROM t WHERE x IN (SELECT id FROM n WHERE owner = 'a')",
@@ -1324,4 +1326,116 @@ fn value_forms_without_a_single_spelling_are_refused() {
         &GenericDialect {},
         &["{d '2020-01-01'} = D", "x = ARRAY(SELECT 1)"],
     );
+}
+
+#[test]
+fn subqueries_normalize_their_projection_table_and_filter() {
+    assert_canonical(
+        &PostgreSqlDialect {},
+        &[
+            (
+                "x IN (SELECT Id FROM M WHERE Owner = 'a')",
+                "x IN (SELECT id FROM m WHERE ('a' = owner))",
+            ),
+            (
+                "EXISTS (SELECT * FROM U WHERE U.a = T.b)",
+                "EXISTS (SELECT * FROM u WHERE (t.b = u.a))",
+            ),
+            (
+                "NOT EXISTS (SELECT 1 FROM U)",
+                "NOT EXISTS (SELECT 1 FROM u)",
+            ),
+            ("x = (SELECT max(Y) FROM u)", "((SELECT max(y) FROM u) = x)"),
+            ("x = ANY (SELECT Y FROM u)", "x = ANY(SELECT y FROM u)"),
+            ("x = ANY ((SELECT Y FROM u))", "x = ANY(SELECT y FROM u)"),
+        ],
+    );
+    // MySQL matches table names by case, so a subquery's table keeps its spelling.
+    assert_canonical(
+        &MySqlDialect {},
+        &[
+            ("x IN (SELECT ID FROM M)", "x IN (SELECT id FROM M)"),
+            ("x IN (SELECT id FROM m)", "x IN (SELECT id FROM m)"),
+        ],
+    );
+}
+
+#[test]
+fn subqueries_outside_the_served_shape_are_refused() {
+    assert_unsupported(
+        &PostgreSqlDialect {},
+        &[
+            "x IN (SELECT a FROM u GROUP BY a)",
+            "x IN (SELECT a FROM u GROUP BY a HAVING count(a) > 1)",
+            "x IN (SELECT a FROM u ORDER BY a)",
+            "x IN (SELECT a FROM u LIMIT 1)",
+            "x IN (SELECT DISTINCT a FROM u)",
+            "x IN (SELECT a AS b FROM u)",
+            "x IN (SELECT a FROM u AS v)",
+            "x IN (SELECT a FROM u JOIN v ON u.a = v.a)",
+            "x IN (SELECT a FROM u UNION SELECT a FROM v)",
+            "EXISTS (SELECT u.* FROM u)",
+            "x IN (SELECT a FROM u HAVING count(a) > 1)",
+        ],
+    );
+    assert_unsupported(&MySqlDialect {}, &["x IN (SELECT a FROM u USE INDEX (i))"]);
+    assert_unsupported(
+        &SnowflakeDialect {},
+        &["x IN (SELECT a FROM IDENTIFIER('u'))"],
+    );
+}
+
+#[test]
+fn forms_no_where_clause_serves_are_refused() {
+    assert_unsupported(&DuckDbDialect {}, &["{'a': 1} = x", "MAP {'a': 1} = x"]);
+    assert_unsupported(
+        &BigQueryDialect {},
+        &["STRUCT(1 AS a) = x", "x IN UNNEST(arr)"],
+    );
+    assert_unsupported(&DatabricksDialect {}, &["transform(a, x -> x + 1) = b"]);
+    assert_unsupported(&SnowflakeDialect {}, &["a(+) = b"]);
+}
+
+#[test]
+fn a_subquery_filtered_by_true_is_the_unfiltered_subquery() {
+    assert_canonical(
+        &PostgreSqlDialect {},
+        &[
+            (
+                "x IN (SELECT Id FROM u WHERE TRUE)",
+                "x IN (SELECT id FROM u)",
+            ),
+            (
+                "x IN (SELECT id FROM u WHERE (TRUE))",
+                "x IN (SELECT id FROM u)",
+            ),
+            ("x IN (SELECT id FROM u)", "x IN (SELECT id FROM u)"),
+            (
+                "x IN (SELECT id FROM u WHERE FALSE)",
+                "x IN (SELECT id FROM u WHERE false)",
+            ),
+        ],
+    );
+}
+
+#[test]
+fn a_caller_built_form_no_predicate_holds_is_refused() {
+    let name = || Box::new(Expr::Identifier(Ident::new("a")));
+    for expr in [
+        Expr::Wildcard(AttachedToken::empty()),
+        Expr::Prior(name()),
+        Expr::GroupingSets(vec![vec![*name()]]),
+        Expr::Named {
+            expr: name(),
+            name: Ident::new("b"),
+        },
+    ] {
+        assert!(
+            matches!(
+                Canonicalizer::new(&PostgreSqlDialect {}).normalize_where_clause(Some(&expr)),
+                Err(CanonicalizeError::Unsupported(_))
+            ),
+            "{expr:?}"
+        );
+    }
 }
