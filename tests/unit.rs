@@ -1,8 +1,8 @@
 use sqlparser::ast::helpers::attached_token::AttachedToken;
 use sqlparser::ast::{Expr, Ident, SetExpr, Statement};
 use sqlparser::dialect::{
-    AnsiDialect, BigQueryDialect, DatabricksDialect, Dialect, DuckDbDialect, GenericDialect,
-    MsSqlDialect, MySqlDialect, PostgreSqlDialect, SQLiteDialect, SnowflakeDialect,
+    AnsiDialect, BigQueryDialect, ClickHouseDialect, DatabricksDialect, Dialect, DuckDbDialect,
+    GenericDialect, MsSqlDialect, MySqlDialect, PostgreSqlDialect, SQLiteDialect, SnowflakeDialect,
 };
 use sqlparser::parser::Parser;
 use sqlparser_canonicalize::{CanonicalizeError, Canonicalizer, hash_canonical};
@@ -461,6 +461,28 @@ fn test_normalize_not_in_list() {
     let sql = "SELECT * FROM t WHERE status NOT IN ('active', 'pending')";
     let result = Canonicalizer::new(&dialect).normalize_sql(sql).unwrap();
     assert!(result.contains("NOT IN"));
+}
+
+#[test]
+fn global_membership_keeps_its_modifier() {
+    assert_canonical(
+        &ClickHouseDialect {},
+        &[
+            ("a GLOBAL IN (3, 1, 2)", "a GLOBAL IN (1, 2, 3)"),
+            ("a GLOBAL NOT IN (2, 1)", "a GLOBAL NOT IN (1, 2)"),
+            ("a IN (2, 1)", "a IN (1, 2)"),
+            ("a NOT IN (2, 1)", "a NOT IN (1, 2)"),
+            (
+                "a GLOBAL IN (SELECT b FROM u)",
+                "a GLOBAL IN (SELECT b FROM u)",
+            ),
+            (
+                "a GLOBAL NOT IN (SELECT b FROM u)",
+                "a GLOBAL NOT IN (SELECT b FROM u)",
+            ),
+            ("a IN (SELECT b FROM u)", "a IN (SELECT b FROM u)"),
+        ],
+    );
 }
 
 #[test]
