@@ -425,6 +425,7 @@ fn normalize_expr_inner(
             expr,
             list,
             negated,
+            global,
         } => {
             let mut items: Vec<String> = list
                 .iter()
@@ -432,10 +433,10 @@ fn normalize_expr_inner(
                 .collect::<Result<_, _>>()?;
             items.sort();
             open_list(&mut items, context);
-            let not = if *negated { "NOT " } else { "" };
             let mut text = format!(
-                "{} {not}IN (",
-                normalize_expr_inner(expr, depth + 1, true, context)?
+                "{} {}IN (",
+                normalize_expr_inner(expr, depth + 1, true, context)?,
+                membership_modifiers(*global, *negated)
             );
             for (index, item) in items.iter().enumerate() {
                 if index > 0 {
@@ -450,14 +451,13 @@ fn normalize_expr_inner(
             expr,
             subquery,
             negated,
-        } => {
-            let not = if *negated { "NOT " } else { "" };
-            format!(
-                "{} {not}IN ({})",
-                normalize_expr_inner(expr, depth + 1, true, context)?,
-                subquery_text(subquery, depth, context)?
-            )
-        }
+            global,
+        } => format!(
+            "{} {}IN ({})",
+            normalize_expr_inner(expr, depth + 1, true, context)?,
+            membership_modifiers(*global, *negated),
+            subquery_text(subquery, depth, context)?
+        ),
         Expr::Exists { subquery, negated } => {
             let not = if *negated { "NOT " } else { "" };
             format!("{not}EXISTS ({})", subquery_text(subquery, depth, context)?)
@@ -863,6 +863,16 @@ fn postfix_text(
 ) -> Result<String, CanonicalizeError> {
     let operand = normalize_expr_inner(operand, depth + 1, true, context)?;
     Ok(format!("{operand} {suffix}"))
+}
+
+/// Spells the keywords before `IN`, such as `GLOBAL NOT `, in sqlparser's order.
+const fn membership_modifiers(global: bool, negated: bool) -> &'static str {
+    match (global, negated) {
+        (false, false) => "",
+        (false, true) => "NOT ",
+        (true, false) => "GLOBAL ",
+        (true, true) => "GLOBAL NOT ",
+    }
 }
 
 /// Spells the operator of a pattern match, such as `NOT SIMILAR TO`.

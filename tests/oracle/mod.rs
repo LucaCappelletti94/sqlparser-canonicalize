@@ -183,17 +183,19 @@ pub fn meaning(expr: &Expr, folding: Folding) -> String {
             expr,
             list,
             negated,
+            global,
         } => {
             let mut items: Vec<String> = list.iter().map(m).collect();
             items.sort();
-            format!("(in {negated} {} [{}])", m(expr), items.join(" "))
+            format!("(in {global} {negated} {} [{}])", m(expr), items.join(" "))
         }
         Expr::InSubquery {
             expr,
             subquery,
             negated,
+            global,
         } => format!(
-            "(in-subquery {negated} {} {})",
+            "(in-subquery {global} {negated} {} {})",
             m(expr),
             query_meaning(subquery, folding)
         ),
