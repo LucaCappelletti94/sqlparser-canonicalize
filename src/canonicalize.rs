@@ -9,8 +9,8 @@ use seahash::SeaHasher;
 use sqlparser::ast::{
     AccessExpr, BinaryOperator, CastKind, CeilFloorKind, DateTimeField, Distinct, Expr,
     ExtractSyntax, Function, FunctionArg, FunctionArgExpr, FunctionArguments, GroupByExpr, Ident,
-    Interval, LimitClause, ObjectName, Query, Select, SelectItem, SelectModifiers, SetExpr,
-    Statement, Subscript, TableAlias, TableFactor, UnaryOperator, Value,
+    InTarget, Interval, LimitClause, ObjectName, Query, Select, SelectItem, SelectModifiers,
+    SetExpr, Statement, Subscript, TableAlias, TableFactor, UnaryOperator, Value,
 };
 use sqlparser::dialect::{AnsiDialect, Dialect, MySqlDialect, PostgreSqlDialect, SQLiteDialect};
 use sqlparser::keywords::ALL_KEYWORDS;
@@ -421,43 +421,42 @@ fn normalize_expr_inner(
             );
             postfix_text(expr, &suffix, depth, context)?
         }
-        Expr::InList {
+        Expr::In {
             expr,
-            list,
+            target,
             negated,
             global,
         } => {
-            let mut items: Vec<String> = list
-                .iter()
-                .map(|item| normalize_expr_inner(item, depth + 1, true, context))
-                .collect::<Result<_, _>>()?;
-            items.sort();
-            open_list(&mut items, context);
-            let mut text = format!(
-                "{} {}IN (",
-                normalize_expr_inner(expr, depth + 1, true, context)?,
-                membership_modifiers(*global, *negated)
-            );
-            for (index, item) in items.iter().enumerate() {
-                if index > 0 {
-                    text.push_str(", ");
+            let modifiers = membership_modifiers(*global, *negated);
+            match target {
+                InTarget::List(list) => {
+                    let mut items: Vec<String> = list
+                        .iter()
+                        .map(|item| normalize_expr_inner(item, depth + 1, true, context))
+                        .collect::<Result<_, _>>()?;
+                    items.sort();
+                    open_list(&mut items, context);
+                    let mut text = format!(
+                        "{} {modifiers}IN (",
+                        normalize_expr_inner(expr, depth + 1, true, context)?
+                    );
+                    for (index, item) in items.iter().enumerate() {
+                        if index > 0 {
+                            text.push_str(", ");
+                        }
+                        text.push_str(item);
+                    }
+                    text.push(')');
+                    text
                 }
-                text.push_str(item);
+                InTarget::Subquery(subquery) => format!(
+                    "{} {modifiers}IN ({})",
+                    normalize_expr_inner(expr, depth + 1, true, context)?,
+                    subquery_text(subquery, depth, context)?
+                ),
+                InTarget::Unnest(_) => return Err(refused("IN UNNEST")),
             }
-            text.push(')');
-            text
         }
-        Expr::InSubquery {
-            expr,
-            subquery,
-            negated,
-            global,
-        } => format!(
-            "{} {}IN ({})",
-            normalize_expr_inner(expr, depth + 1, true, context)?,
-            membership_modifiers(*global, *negated),
-            subquery_text(subquery, depth, context)?
-        ),
         Expr::Exists { subquery, negated } => {
             let not = if *negated { "NOT " } else { "" };
             format!("{not}EXISTS ({})", subquery_text(subquery, depth, context)?)
@@ -789,7 +788,6 @@ fn normalize_expr_inner(
             field_access_text(root, access_chain, depth, context)?
         }
         // Named statically, because printing an unbounded tree can be slow in sqlparser.
-        Expr::InUnnest { .. } => return Err(refused("IN UNNEST")),
         Expr::Struct { .. } => return Err(refused("STRUCT")),
         Expr::Named { .. } => return Err(refused("a named expression")),
         Expr::Dictionary(_) => return Err(refused("a dictionary literal")),
@@ -1448,9 +1446,7 @@ const fn encloses_itself(expr: &Expr) -> bool {
         | Expr::IsNotUnknown(_)
         | Expr::IsJson { .. }
         | Expr::IsNormalized { .. }
-        | Expr::InList { .. }
-        | Expr::InSubquery { .. }
-        | Expr::InUnnest { .. }
+        | Expr::In { .. }
         | Expr::Between { .. }
         | Expr::Like { .. }
         | Expr::ILike { .. }

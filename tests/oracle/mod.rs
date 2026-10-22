@@ -9,8 +9,8 @@
 
 use sqlparser::ast::{
     AccessExpr, BinaryOperator, CastKind, CeilFloorKind, Expr, FunctionArg, FunctionArgExpr,
-    FunctionArguments, GroupByExpr, Ident, ObjectName, Query, SelectItem, SetExpr, Subscript,
-    TableFactor, UnaryOperator, Value,
+    FunctionArguments, GroupByExpr, Ident, InTarget, ObjectName, Query, SelectItem, SetExpr,
+    Subscript, TableFactor, UnaryOperator, Value,
 };
 use sqlparser::dialect::{AnsiDialect, Dialect, MySqlDialect, PostgreSqlDialect, SQLiteDialect};
 
@@ -179,9 +179,9 @@ pub fn meaning(expr: &Expr, folding: Folding) -> String {
         Expr::IsNotFalse(expr) => format!("(is-not-false {})", m(expr)),
         Expr::IsUnknown(expr) => format!("(is-unknown {})", m(expr)),
         Expr::IsNotUnknown(expr) => format!("(is-not-unknown {})", m(expr)),
-        Expr::InList {
+        Expr::In {
             expr,
-            list,
+            target: InTarget::List(list),
             negated,
             global,
         } => {
@@ -189,9 +189,9 @@ pub fn meaning(expr: &Expr, folding: Folding) -> String {
             items.sort();
             format!("(in {global} {negated} {} [{}])", m(expr), items.join(" "))
         }
-        Expr::InSubquery {
+        Expr::In {
             expr,
-            subquery,
+            target: InTarget::Subquery(subquery),
             negated,
             global,
         } => format!(
