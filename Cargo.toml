@@ -19,7 +19,7 @@ std = ["sqlparser/recursive-protection"]
 
 [dependencies]
 seahash = { version = "4.1", default-features = false }
-# Follows apache main until a sqlparser release carries the `global` field of `Expr::InList`.
+# Follows apache main until a sqlparser release carries `Expr::In` with its `global` field.
 sqlparser = { git = "https://github.com/apache/datafusion-sqlparser-rs", branch = "main", default-features = false }
 thiserror = { version = "2.0", default-features = false }
 
